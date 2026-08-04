@@ -1,0 +1,172 @@
+"""IK 前馈 + PID 反馈控制器。
+
+控制目标：球杆系统 pitch (绕 X 轴) 和 yaw (绕 Y 轴) 姿态。
+控制量：4 路舵机角度，归一化到 [-1, 1]，0 为中位 (135°/270° 中位)。
+
+数据流：
+    target pose ──→ IK 前馈 ──→ ΔL_ff ──┐
+                                          ├──→ 舵机归一化角度 [-1, 1]
+    姿态误差 ──→ PID 反馈 ──→ ΔL_fb ──┘
+
+PID 输出被解释为对 target pose 的修正 (再经 IK 转换为缆长变化)，
+避免直接求解 Jacobian。
+"""
+
+from __future__ import annotations
+
+from dataclasses import dataclass
+
+import numpy as np
+from numpy.typing import NDArray
+
+from ..geometric_ik import GeometricIK
+
+
+@dataclass
+class PIDGains:
+    """PID 增益。"""
+    Kp: float = 1.0
+    Ki: float = 0.0
+    Kd: float = 0.0
+    integral_max: float = 10.0        # 积分项限幅 (deg)
+    output_max: float = 20.0           # PID 总输出限幅 (deg)
+
+
+class PID:
+    """离散 PID 控制器，带积分抗饱和。"""
+
+    def __init__(self, gains: PIDGains | None = None):
+        self._g = gains or PIDGains()
+        self._integral: float = 0.0
+        self._prev_error: float | None = None
+
+    def update(self, error: float, dt: float) -> float:
+        """计算控制量。
+
+        Args:
+            error: 当前误差 (目标 − 实际).
+            dt: 时间步长 (s).
+
+        Returns:
+            控制量 (与 error 同单位).
+        """
+        g = self._g
+
+        # 比例项
+        P = g.Kp * error
+
+        # 积分项 (梯形积分，带限幅)
+        self._integral += g.Ki * error * dt
+        self._integral = np.clip(self._integral, -g.integral_max, g.integral_max)
+        I = self._integral
+
+        # 微分项 (对测量微分，避免微分冲击)
+        D = 0.0
+        if self._prev_error is not None and dt > 1e-9:
+            D = g.Kd * (error - self._prev_error) / dt
+        self._prev_error = error
+
+        output = P + I + D
+        return float(np.clip(output, -g.output_max, g.output_max))
+
+    def reset(self) -> None:
+        self._integral = 0.0
+        self._prev_error = None
+
+
+class BasePIDController:
+    """IK 前馈 + PID 反馈球关节控制器。
+
+    用法:
+        ctrl = BasePIDController()
+        servo_cmd = ctrl.update(
+            target_pitch=10.0, target_yaw=0.0,
+            current_pitch=9.5, current_yaw=-0.3,
+            dt=0.01,
+        )
+    """
+
+    # ---- 舵机参数 ----
+    DRUM_RADIUS_MM: float = 18.0   # 舵盘半径 (mm)
+    SERVO_TOTAL_DEG: float = 270.0  # 舵机总行程 (度)
+    SERVO_MID_DEG: float = 135.0    # 舵机中位角度 (度)
+    SERVO_HALF_DEG: float = 135.0   # 半行程 (= SERVO_TOTAL_DEG / 2)
+
+    def __init__(
+        self,
+        pitch_pid: PID | None = None,
+        yaw_pid: PID | None = None,
+        drum_radius_mm: float | None = None,
+    ):
+        self._ik = GeometricIK()
+        self._pid_pitch = pitch_pid or PID(PIDGains(Kp=0.5))
+        self._pid_yaw = yaw_pid or PID(PIDGains(Kp=0.5))
+        self._drum_radius = drum_radius_mm or self.DRUM_RADIUS_MM
+
+    # ------------------------------------------------------------------
+    # 公开接口
+    # ------------------------------------------------------------------
+
+    @property
+    def ik(self) -> GeometricIK:
+        return self._ik
+
+    @property
+    def pitch_pid(self) -> PID:
+        return self._pid_pitch
+
+    @property
+    def yaw_pid(self) -> PID:
+        return self._pid_yaw
+
+    def update(
+        self,
+        target_pitch_deg: float,
+        target_yaw_deg: float,
+        current_pitch_deg: float,
+        current_yaw_deg: float,
+        dt: float,
+    ) -> NDArray:
+        """单步控制更新。
+
+        Args:
+            target_pitch_deg: 目标 pitch (绕 X 轴, 度).
+            target_yaw_deg: 目标 yaw (绕 Y 轴, 度).
+            current_pitch_deg: 当前测量 pitch (度).
+            current_yaw_deg: 当前测量 yaw (度).
+            dt: 距上次调用的时间间隔 (s).
+
+        Returns:
+            servo_norm: shape (4,), 归一化舵机角度 [-1, 1].
+        """
+        # PID 反馈 → 姿态修正量
+        e_pitch = target_pitch_deg - current_pitch_deg
+        e_yaw = target_yaw_deg - current_yaw_deg
+
+        pitch_fb = self._pid_pitch.update(e_pitch, dt)
+        yaw_fb = self._pid_yaw.update(e_yaw, dt)
+
+        # 前馈 + 反馈合成目标姿态
+        cmd_pitch = target_pitch_deg + pitch_fb
+        cmd_yaw = target_yaw_deg + yaw_fb
+
+        # IK → 缆长变化量
+        delta_L = self._ik.solve(cmd_pitch, cmd_yaw)
+
+        # 缆长 → 归一化舵机角度
+        return self._cable_delta_to_servo_norm(delta_L)
+
+    def reset(self) -> None:
+        """重置 PID 状态。"""
+        self._pid_pitch.reset()
+        self._pid_yaw.reset()
+
+    # ------------------------------------------------------------------
+    # 内部方法
+    # ------------------------------------------------------------------
+
+    def _cable_delta_to_servo_norm(self, delta_L_mm: NDArray) -> NDArray:
+        """缆长变化量 → 归一化舵机角度 [-1, 1]."""
+        # ΔL = r * Δθ  (Δθ 单位: rad)
+        delta_theta_deg = delta_L_mm / self._drum_radius * (180.0 / np.pi)
+        return delta_theta_deg / self.SERVO_HALF_DEG

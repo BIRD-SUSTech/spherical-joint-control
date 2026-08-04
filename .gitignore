@@ -1,0 +1,38 @@
+# === Claude Code 本地设置 ===
+.claude/
+
+# === 参考代码（不上传） ===
+example_code/
+
+# === Python ===
+__pycache__/
+*.py[cod]
+*.so
+.eggs/
+*.egg-info/
+build/
+dist/
+.venv/
+venv/
+env/
+
+# === 采集数据输出 ===
+data_collection/sessions/
+
+# === 环境与密钥 ===
+.env
+.env.*
+
+# === 日志 ===
+*.log
+
+# === IDE / 编辑器 ===
+.vscode/
+.idea/
+*.swp
+*.swo
+*.tmp
+
+# === 操作系统 ===
+.DS_Store
+Thumbs.db
