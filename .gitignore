@@ -19,6 +19,9 @@ env/
 # === 采集数据输出 ===
 data_collection/sessions/
 
+# === 数据处理输出 ===
+data_collection/outputs/
+
 # === 环境与密钥 ===
 .env
 .env.*

@@ -5,5 +5,9 @@ numpy>=2.0
 bleak>=3.0          # IM948 BLE IMU
 pyserial>=3.5       # 力传感器 MODBUS-RTU (串口)
 
+# 数据分析
+pandas>=3.0
+matplotlib >=3.10.0
+
 # nokov 动捕 SDK: 非 pip 包，需单独安装厂商 SDK (nokov/nokovsdk)
 # 安装后应可通过 `from nokov import nokovsdk` 导入
