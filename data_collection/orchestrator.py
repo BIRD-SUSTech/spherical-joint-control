@@ -17,6 +17,7 @@ import numpy as np
 from numpy.typing import NDArray
 
 from control_model.base_PID.pid_controller import BasePIDController
+from control_model.open_loop.open_loop_controller import OpenLoopController
 from .config import Config, OrchestratorConfig, OutputConfig
 from .servo_controller import (
     LogServoController,
@@ -41,7 +42,7 @@ from .sensor_collectors.force_collector import ForceCollector
 from .sensor_collectors.imu_collector import ImuCollector
 from .sensor_collectors.mocap_collector import MocapCollector
 from .utils.session import SessionManager, SessionPaths
-from .utils.trajectory import Trajectory
+from .utils.trajectory import Trajectory, make_circle_trajectory, make_sine_trajectory
 
 logger = logging.getLogger(__name__)
 
@@ -72,6 +73,7 @@ class Orchestrator:
         # PID 闭环跟踪
         self._pid_servo: Optional[PIDServoController] = None
         self._servo_driver: Optional[SerialServoDriver] = None
+        self._open_loop: Optional[OpenLoopController] = None
         self._pose_lock = threading.Lock()
         self._current_pitch_deg = 0.0
         self._current_yaw_deg = 0.0
@@ -209,15 +211,18 @@ class Orchestrator:
 
     def _should_use_pid_servo(self) -> bool:
         cfg = self._config.servo
-        return (
-            cfg.trajectory_type == "waypoints"
-            and bool(cfg.trajectory_waypoints)
-        )
+        if cfg.trajectory_type == "waypoints":
+            return bool(cfg.trajectory_waypoints)
+        return cfg.trajectory_type in ("circle", "sine")
 
     def _setup_pid_servo(self) -> None:
         cfg = self._config.servo
-        trajectory = Trajectory.from_pairs(cfg.trajectory_waypoints)
-        pid = BasePIDController()
+        trajectory = self._make_trajectory(cfg)
+        pid = BasePIDController(
+            pretension_mm=cfg.pretension_mm,
+            filter_tau_s=cfg.mocap_filter_tau_s,
+        )
+        self._open_loop = OpenLoopController(pretension_mm=cfg.pretension_mm)
 
         driver: Optional[SerialServoDriver] = None
         if cfg.enabled and cfg.port:
@@ -232,7 +237,28 @@ class Orchestrator:
             output_queue=self._q_servo,
         )
         mode = f"serial:{cfg.port}" if driver else "log-only"
-        logger.info("PID servo configured: %d waypoints (%s)", len(trajectory), mode)
+        logger.info("PID servo configured: %d waypoints, type=%s (%s)",
+                    len(trajectory), cfg.trajectory_type, mode)
+
+    @staticmethod
+    def _make_trajectory(cfg) -> Trajectory:
+        if cfg.trajectory_type == "waypoints":
+            return Trajectory.from_pairs(cfg.trajectory_waypoints)
+        elif cfg.trajectory_type == "circle":
+            return make_circle_trajectory(
+                radius_deg=cfg.trajectory_amplitude_deg,
+                period_s=cfg.trajectory_period_s,
+                steps=cfg.trajectory_steps,
+            )
+        elif cfg.trajectory_type == "sine":
+            return make_sine_trajectory(
+                pitch_amplitude_deg=cfg.trajectory_amplitude_deg,
+                yaw_amplitude_deg=cfg.trajectory_amplitude_deg,
+                period_s=cfg.trajectory_period_s,
+                steps=cfg.trajectory_steps,
+            )
+        else:
+            return Trajectory([])
 
     def _connect_all(self) -> None:
         if self._mocap and not self._mocap.connect():
@@ -240,6 +266,11 @@ class Orchestrator:
             self._mocap = None
         if self._servo_driver and not self._servo_driver.connect():
             logger.warning("Servo serial open failed; continuing log-only")
+        else:
+            # 舵机初始化：发送零位保持中立
+            if self._servo_driver:
+                self._servo_driver.send(np.zeros(4))
+                logger.info("Servo initialized to neutral position")
         if self._pid_servo:
             self._pid_servo.connect()
         elif self._servo:
@@ -271,12 +302,16 @@ class Orchestrator:
 
         # 标定段
         logger.info("=== PHASE: CALIBRATION (%.0fs) ===", orch.calibration_duration_s)
-        logger.info(
-            "Move the linkage in BOTH pitch and roll directions, "
-            "at least +/- 15 deg in each axis."
-        )
         self._set_phase(CollectionPhase.CALIBRATION)
-        self._sleep_with_progress(orch.calibration_duration_s)
+        if self._servo_driver and self._open_loop:
+            logger.info("Running open-loop calibration sweep...")
+            self._run_calibration_sweep(orch.calibration_duration_s)
+        else:
+            logger.info(
+                "Move the linkage in BOTH pitch and roll directions, "
+                "at least +/- 15 deg in each axis."
+            )
+            self._sleep_with_progress(orch.calibration_duration_s)
 
         # 探索段
         if orch.exploration_duration_s is not None:
@@ -310,6 +345,55 @@ class Orchestrator:
             sleep_time = min(interval, remaining)
             time.sleep(sleep_time)
             elapsed = time.perf_counter() - start
+
+    def _run_calibration_sweep(self, duration_s: float) -> None:
+        """在标定阶段运行开环正弦扫频轨迹."""
+        amp = self._config.servo.calibration_amplitude_deg
+        traj = make_sine_trajectory(
+            pitch_amplitude_deg=amp,
+            yaw_amplitude_deg=amp,
+            period_s=duration_s,
+            steps=max(20, int(duration_s * 10)),
+        )
+        logger.info("Calibration sweep: %d waypoints over %.1fs", len(traj), duration_s)
+
+        for wp in traj:
+            if self._stop_event.is_set():
+                break
+            servo_norm = self._open_loop.command(wp.pitch_deg, wp.yaw_deg)
+            if self._servo_driver:
+                self._servo_driver.send(servo_norm)
+            self._log_servo_state(servo_norm, wp.pitch_deg, wp.yaw_deg,
+                                  self._current_pitch_deg, self._current_yaw_deg)
+            time.sleep(wp.duration_s)
+
+        # 扫频结束回到中立位
+        if self._servo_driver:
+            self._servo_driver.send(np.zeros(4))
+        logger.info("Calibration sweep complete")
+
+    def _log_servo_state(
+        self,
+        servo_norm: NDArray,
+        target_pitch: float,
+        target_yaw: float,
+        current_pitch: float,
+        current_yaw: float,
+    ) -> None:
+        """写一条舵机状态到输出队列."""
+        now_ns = time.perf_counter_ns()
+        now_ms = int(time.time() * 1000)
+        state = ServoState(
+            pc_timestamp_ns=now_ns,
+            pc_receive_unix_time_ms=now_ms,
+            target_angles=list(servo_norm),
+            estimated_cable_lengths=[target_pitch, target_yaw, current_pitch, current_yaw],
+            estimated_joint_angles=[target_pitch, target_yaw],
+        )
+        try:
+            self._q_servo.put_nowait(state)
+        except queue.Full:
+            pass
 
     # ------------------------------------------------------------------
     # Consumer 线程

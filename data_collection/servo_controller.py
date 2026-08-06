@@ -283,12 +283,14 @@ class PIDServoController:
         last_time = time.perf_counter()
         wp_index = 0
         waypoints = self._trajectory.waypoints
+        total_wp = len(waypoints)
+        loop_count = 0
 
-        while wp_index < len(waypoints) and not self._stop_event.is_set():
+        while not self._stop_event.is_set():
             wp = waypoints[wp_index]
             deadline = time.perf_counter() + wp.duration_s
-            logger.debug("Waypoint %d/%d: pitch=%.1f, yaw=%.1f, dur=%.1fs",
-                         wp_index + 1, len(waypoints),
+            logger.debug("Waypoint %d/%d (loop %d): pitch=%.1f, yaw=%.1f, dur=%.1fs",
+                         wp_index + 1, total_wp, loop_count,
                          wp.pitch_deg, wp.yaw_deg, wp.duration_s)
 
             while time.perf_counter() < deadline and not self._stop_event.is_set():
@@ -316,8 +318,10 @@ class PIDServoController:
                 time.sleep(self.LOOP_PERIOD_S)
 
             wp_index += 1
-
-        logger.info("PIDServoController: trajectory complete")
+            if wp_index >= total_wp:
+                wp_index = 0
+                loop_count += 1
+                logger.info("PIDServoController: loop %d complete, restarting", loop_count)
 
     # ------------------------------------------------------------------
     # 日志

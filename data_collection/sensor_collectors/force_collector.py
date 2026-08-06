@@ -88,11 +88,13 @@ class ForceCollector:
             try:
                 raw = self._client.read_32bit_values(slave, start_addr, channel_count, signed=True)
                 values = [v * scale for v in raw]
+                # pad to 6 elements to match ForceData fields
+                padded = values + [0.0] * (6 - len(values))
                 data = ForceData(
                     pc_timestamp_ns=time.perf_counter_ns(),
                     pc_receive_unix_time_ms=int(time.time() * 1000),
-                    ch1=values[0], ch2=values[1], ch3=values[2],
-                    ch4=values[3], ch5=values[4], ch6=values[5],
+                    ch1=padded[0], ch2=padded[1], ch3=padded[2],
+                    ch4=padded[3], ch5=padded[4], ch6=padded[5],
                 )
                 try:
                     self._output_queue.put_nowait(data)

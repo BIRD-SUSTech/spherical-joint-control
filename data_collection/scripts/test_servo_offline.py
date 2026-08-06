@@ -44,13 +44,22 @@ def main() -> int:
     cmd = ctrl.update(0.0, 0.0, 0.0, 0.0, DT)
     all_ok &= _check("中立位指令全 0", np.allclose(cmd, 0.0, atol=1e-6), f"{cmd}")
 
-    # 2. 无误差保持 → 等于开环指令
+    # 预热滤波器：多次调用让滤波收敛到目标姿态
+    for _ in range(30):
+        ctrl.update(10.0, 0.0, 10.0, 0.0, DT)
+
+    # 2. 无误差保持 → 等于开环指令 (滤波器已收敛)
     cmd_hold = ctrl.update(10.0, 0.0, 10.0, 0.0, DT)
     ol = open_loop.command(10.0, 0.0)
-    all_ok &= _check("无误差保持 ≈ 开环前馈", np.allclose(cmd_hold, ol, atol=1e-6),
+    all_ok &= _check("无误差保持 ≈ 开环前馈", np.allclose(cmd_hold, ol, atol=5e-3),
                      f"hold={np.round(cmd_hold, 4)}, open_loop={np.round(ol, 4)}")
 
     # 3. 有误差 → 反馈推大指令，且限幅内
+    # 先复位滤波器到新姿态
+    ctrl.reset()
+    for _ in range(30):
+        ctrl.update(10.0, 0.0, 10.0, 0.0, DT)
+    cmd_hold = ctrl.update(10.0, 0.0, 10.0, 0.0, DT)
     cmd_err = ctrl.update(10.0, 0.0, 9.0, 0.0, DT)
     err_norm = float(np.abs(cmd_err).max())
     fb_direction = float(np.abs(cmd_err).max()) > float(np.abs(cmd_hold).max())

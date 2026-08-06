@@ -25,8 +25,8 @@ R: float = 25.0  # 球体半径 (mm)
 PHI_FIX_DEG: float = 41.0    # 顶部圆环
 PHI_BALL_DEG: float = 137.0  # 底部圆环
 
-# 四点绕 Z 轴方位角 (度)
-THETA_OFFSETS_DEG: tuple[float, float, float, float] = (0.0, 90.0, 180.0, 270.0)
+# 四点绕 Z 轴方位角 (度) — 对应物理舵机 1(下) 2(右) 3(上) 4(左)
+THETA_OFFSETS_DEG: tuple[float, float, float, float] = (90.0, 180.0, 270.0, 0.0)
 
 
 def _sph2cart(phi_deg: float, theta_deg: float) -> NDArray:
