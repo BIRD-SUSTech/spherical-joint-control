@@ -18,8 +18,8 @@ class MocapConfig:
 class ImuConfig:
     device_address: str = "A5:B2:90:FF:4A:12"
     device_name_keyword: str = "im948"
-    report_hz: int = 50
-    report_tag: int = 0x0067
+    report_hz: int = 100
+    report_tag: int = 0x0025
     notify_characteristic: int = 0x0007
     write_characteristic: int = 0x0005
     scan_timeout_s: float = 10.0
@@ -29,7 +29,7 @@ class ImuConfig:
 
 @dataclass
 class ForceConfig:
-    serial_port: str = "COM5"
+    serial_port: str = "COM6"
     baudrate: int = 19200
     data_bits: int = 8
     stop_bits: int = 1
@@ -40,7 +40,7 @@ class ForceConfig:
     rs485_tx_level: bool = True
     slave_address: int = 0x01
     reg_start_address: int = 0x000B
-    channel_count: int = 6
+    channel_count: int = 4
     scale_factor: float = 1.0
     sample_interval_ms: int = 100
 
@@ -48,15 +48,23 @@ class ForceConfig:
 @dataclass
 class ServoConfig:
     enabled: bool = False
-    port: str = "COM3"
+    port: str = "COM5"
     baudrate: int = 115200
     servo_count: int = 4
     # 轨迹配置
-    trajectory_type: str = "idle"      # "idle" | "waypoints" | "sine" | "circle" | "file"
+    trajectory_type: str = "idle"      # "idle" | "waypoints" | "sine" | "circle"
     trajectory_file: Optional[str] = None
     trajectory_waypoints: list = field(default_factory=list)  # [(pitch, yaw, dur_s), ...]
+    trajectory_amplitude_deg: float = 10.0   # circle/sine 振幅
+    trajectory_period_s: float = 10.0        # circle/sine 周期
+    trajectory_steps: int = 100              # circle/sine 路径点数
+    # 标定
+    calibration_amplitude_deg: float = 20.0  # 标定扫频振幅
+    # 预紧
+    pretension_mm: float = 2.0               # 线缆预紧量，正值=缩短，防松弛脱盘
     # PID 反馈
-    rigid_body_id: int = 1             # 用于姿态反馈的 mocap 刚体 ID
+    mocap_filter_tau_s: float = 0.0          # 动捕反馈 EMA 滤波时间常数 (s)，0=关闭
+    rigid_body_id: int = 0             # 用于姿态反馈的 mocap 刚体 ID
     servo_ids: list[int] = field(default_factory=lambda: [0, 1, 2, 3])
 
 
@@ -68,7 +76,7 @@ class OutputConfig:
     enable_imu_csv: bool = True
     enable_force_csv: bool = True
     enable_servo_csv: bool = True
-    queue_maxsize: int = 1000
+    queue_maxsize: int = 5000
     flush_interval_rows: int = 10
 
 

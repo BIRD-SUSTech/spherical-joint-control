@@ -1,8 +1,0 @@
-# 球关节数据采集系统 — 运行时依赖
-# 安装: pip install -r requirements.txt
-#
-# nokovsdk 需从本地 wheel 安装:
-#   pip install ..\\example_code\\motion_capture\\nokovpy-3.0.1-py3-none-any.whl
-
-pyserial>=3.5
-bleak>=3.0

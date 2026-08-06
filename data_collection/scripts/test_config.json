@@ -6,19 +6,17 @@
     "device_address": "A5:B2:90:FF:4A:12"
   },
   "force": {
-    "serial_port": "COM5"
+    "serial_port": "COM6"
   },
   "servo": {
-    "trajectory_type": "waypoints",
-    "trajectory_waypoints": [
-      [0, 0, 5],
-      [10, 0, 5],
-      [0, 10, 5],
-      [-10, 0, 5],
-      [0, -10, 5],
-      [0, 0, 5]
-    ],
-    "rigid_body_id": 1
+    "enabled": true,
+    "port": "COM5",
+    "trajectory_type": "circle",
+    "trajectory_amplitude_deg": 15,
+    "trajectory_period_s": 10,
+    "trajectory_steps": 200,
+    "calibration_amplitude_deg": 20,
+    "rigid_body_id": 0
   },
   "output": {
     "root_dir": "data_collection/sessions"

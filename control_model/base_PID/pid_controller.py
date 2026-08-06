@@ -97,11 +97,19 @@ class BasePIDController:
         pitch_pid: PID | None = None,
         yaw_pid: PID | None = None,
         drum_radius_mm: float | None = None,
+        pretension_mm: float = 0.0,
+        antagonistic_max_diff: float = 0.10,
+        filter_tau_s: float = 0.05,
     ):
         self._ik = GeometricIK()
-        self._pid_pitch = pitch_pid or PID(PIDGains(Kp=0.5))
-        self._pid_yaw = yaw_pid or PID(PIDGains(Kp=0.5))
+        self._pid_pitch = pitch_pid or PID(PIDGains(Kp=1.0, Ki=0.3, integral_max=15.0))
+        self._pid_yaw = yaw_pid or PID(PIDGains(Kp=1.0, Ki=0.3, integral_max=15.0))
         self._drum_radius = drum_radius_mm or self.DRUM_RADIUS_MM
+        self._pretension_mm = pretension_mm
+        self._antagonistic_max_diff = antagonistic_max_diff
+        self._filter_tau_s = filter_tau_s
+        self._filtered_pitch: float | None = None
+        self._filtered_yaw: float | None = None
 
     # ------------------------------------------------------------------
     # 公开接口
@@ -139,6 +147,11 @@ class BasePIDController:
         Returns:
             servo_norm: shape (4,), 归一化舵机角度 [-1, 1].
         """
+        # EMA 低通滤波 — 平滑动捕噪声
+        current_pitch_deg, current_yaw_deg = self._filter_pose(
+            current_pitch_deg, current_yaw_deg, dt,
+        )
+
         # PID 反馈 → 姿态修正量
         e_pitch = target_pitch_deg - current_pitch_deg
         e_yaw = target_yaw_deg - current_yaw_deg
@@ -157,16 +170,64 @@ class BasePIDController:
         return self._cable_delta_to_servo_norm(delta_L)
 
     def reset(self) -> None:
-        """重置 PID 状态。"""
+        """重置 PID 状态及滤波器。"""
         self._pid_pitch.reset()
         self._pid_yaw.reset()
+        self._filtered_pitch = None
+        self._filtered_yaw = None
+
+    def _filter_pose(
+        self, pitch: float, yaw: float, dt: float,
+    ) -> tuple[float, float]:
+        """指数移动平均低通滤波。
+
+        tau ≤ 0 时直接返回原始值；首帧直接采纳，后续按 alpha = dt/(tau+dt) 平滑。
+        """
+        if self._filter_tau_s <= 0:
+            return pitch, yaw
+        if self._filtered_pitch is None:
+            self._filtered_pitch = pitch
+            self._filtered_yaw = yaw
+            return pitch, yaw
+        alpha = dt / (self._filter_tau_s + dt)
+        self._filtered_pitch += alpha * (pitch - self._filtered_pitch)
+        self._filtered_yaw += alpha * (yaw - self._filtered_yaw)
+        return self._filtered_pitch, self._filtered_yaw
 
     # ------------------------------------------------------------------
     # 内部方法
     # ------------------------------------------------------------------
 
     def _cable_delta_to_servo_norm(self, delta_L_mm: NDArray) -> NDArray:
-        """缆长变化量 → 归一化舵机角度 [-1, 1]."""
-        # ΔL = r * Δθ  (Δθ 单位: rad)
-        delta_theta_deg = delta_L_mm / self._drum_radius * (180.0 / np.pi)
-        return delta_theta_deg / self.SERVO_HALF_DEG
+        """缆长变化量 → 归一化舵机角度 [-1, 1].
+
+        ΔL > 0 表示缆绳需放长，但舵机正角度对应缆绳缩短，
+        因此取负号翻转方向。预紧偏置使中立位时缆绳略有拉力，
+        拮抗约束防止对侧缆绳过度松弛。
+        """
+        # 减去预紧量：中立位(ΔL=0)时舵机会轻微缩短，保持线缆绷紧
+        biased = delta_L_mm - self._pretension_mm
+        delta_theta_deg = biased / self._drum_radius * (180.0 / np.pi)
+        norm = -delta_theta_deg / self.SERVO_HALF_DEG
+        return self._apply_antagonistic_constraint(norm)
+
+    def _apply_antagonistic_constraint(self, norm: NDArray) -> NDArray:
+        """拮抗对约束：防止对侧缆绳过度松弛。
+
+        servo_1↔servo_3 (pitch) 和 servo_2↔servo_4 (yaw) 为拮抗对，
+        放长侧不得低于 pretension_bias - max_diff，不足时从对侧补偿。
+        仅在预紧启用时生效。
+        """
+        if self._pretension_mm <= 0:
+            return norm
+        bias = (self._pretension_mm / self._drum_radius
+                * (180.0 / np.pi) / self.SERVO_HALF_DEG)
+        min_allowed = bias - self._antagonistic_max_diff
+        result = norm.copy()
+        for i, j in [(0, 2), (1, 3)]:
+            for src, dst in [(i, j), (j, i)]:
+                if result[src] < min_allowed:
+                    deficit = min_allowed - result[src]
+                    result[src] = min_allowed
+                    result[dst] -= deficit
+        return result

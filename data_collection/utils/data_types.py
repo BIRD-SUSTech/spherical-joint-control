@@ -91,16 +91,8 @@ IMU_CSV_COLUMNS = [
     "chip_time_ms",
     "subscribe_tag",
     "ax_no_g_mps2", "ay_no_g_mps2", "az_no_g_mps2",
-    "ax_with_g_mps2", "ay_with_g_mps2", "az_with_g_mps2",
     "gyro_x_dps", "gyro_y_dps", "gyro_z_dps",
-    "mag_x", "mag_y", "mag_z",
-    "temperature_c", "air_pressure_hpa", "height_m",
     "quat_w", "quat_x", "quat_y", "quat_z",
-    "angle_x_deg", "angle_y_deg", "angle_z_deg",
-    "offset_x_m", "offset_y_m", "offset_z_m",
-    "steps", "walking", "running", "biking", "driving",
-    "nav_acc_x_mps2", "nav_acc_y_mps2", "nav_acc_z_mps2",
-    "adc_mv", "gpio_raw",
 ]
 
 # IM948 数据包解析常量
@@ -322,7 +314,7 @@ class ImuPacket:
 FORCE_CSV_COLUMNS = [
     "pc_timestamp_ns",
     "pc_receive_unix_time_ms",
-    "ch1", "ch2", "ch3", "ch4", "ch5", "ch6",
+    "ch1", "ch2", "ch3", "ch4",
 ]
 
 

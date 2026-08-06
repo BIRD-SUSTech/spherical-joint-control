@@ -20,10 +20,34 @@ SERVO_TOTAL_DEG: float = 270.0    # 舵机总行程 (度)
 SERVO_HALF_DEG: float = 135.0     # 半行程, 归一化基准
 
 
-def _cable_delta_to_servo_norm(delta_L_mm: NDArray, drum_radius_mm: float) -> NDArray:
-    """缆长变化量 → 归一化舵机角度 [-1, 1]."""
-    delta_theta_deg = delta_L_mm / drum_radius_mm * (180.0 / np.pi)
-    return delta_theta_deg / SERVO_HALF_DEG
+def _cable_delta_to_servo_norm(
+    delta_L_mm: NDArray,
+    drum_radius_mm: float,
+    pretension_mm: float = 0.0,
+    antagonistic_max_diff: float = 0.10,
+) -> NDArray:
+    """缆长变化量 → 归一化舵机角度 [-1, 1].
+
+    ΔL > 0 表示缆绳需放长，但舵机正角度对应缆绳缩短，
+    因此取负号翻转方向。预紧偏置使中立位时缆绳略有拉力，
+    拮抗约束防止对侧缆绳过度松弛。
+    """
+    biased = delta_L_mm - pretension_mm
+    delta_theta_deg = biased / drum_radius_mm * (180.0 / np.pi)
+    norm = -delta_theta_deg / SERVO_HALF_DEG
+    # 拮抗对约束 (仅在预紧启用时生效)
+    if pretension_mm > 0:
+        bias = pretension_mm / drum_radius_mm * (180.0 / np.pi) / SERVO_HALF_DEG
+        min_allowed = bias - antagonistic_max_diff
+        result = norm.copy()
+        for i, j in [(0, 2), (1, 3)]:
+            for src, dst in [(i, j), (j, i)]:
+                if result[src] < min_allowed:
+                    deficit = min_allowed - result[src]
+                    result[src] = min_allowed
+                    result[dst] -= deficit
+        return result
+    return norm
 
 
 class OpenLoopController:
@@ -34,9 +58,16 @@ class OpenLoopController:
         servo_cmd = ctrl.command(pitch_deg=15.0, yaw_deg=-10.0)
     """
 
-    def __init__(self, drum_radius_mm: float | None = None):
+    def __init__(
+        self,
+        drum_radius_mm: float | None = None,
+        pretension_mm: float = 0.0,
+        antagonistic_max_diff: float = 0.10,
+    ):
         self._ik = GeometricIK()
         self._drum_radius = drum_radius_mm or DRUM_RADIUS_MM
+        self._pretension_mm = pretension_mm
+        self._antagonistic_max_diff = antagonistic_max_diff
 
     @property
     def ik(self) -> GeometricIK:
@@ -60,4 +91,6 @@ class OpenLoopController:
             ValueError: 若角度超出 ±60°.
         """
         delta_L = self._ik.solve(pitch_deg, yaw_deg)
-        return _cable_delta_to_servo_norm(delta_L, self._drum_radius)
+        return _cable_delta_to_servo_norm(
+            delta_L, self._drum_radius, self._pretension_mm, self._antagonistic_max_diff,
+        )
