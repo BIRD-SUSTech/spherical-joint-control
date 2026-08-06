@@ -5,8 +5,8 @@ import numpy as np
 import matplotlib.pyplot as plt
 import matplotlib.animation as animation
 
-MOTION_CAP_PATH = r"data_collection\sessions\session_20260806_161207\mocap_data.csv"
-SERVO_DATA_PATH = r"data_collection\sessions\session_20260806_161207\servo_data.csv"
+MOTION_CAP_PATH = r"data_collection\sessions\session_20260806_171033\mocap_data.csv"
+SERVO_DATA_PATH = r"data_collection\sessions\session_20260806_171033\servo_data.csv"
 TOLERANCE = 50_000_000  # 单位：ns 这里是50毫秒
 
 
@@ -83,6 +83,11 @@ def evaluation(mocap_path: str = None, servo_path: str = None) -> pd.DataFrame |
     )
     aligned_data["yaw_error"] = aligned_data["mocap_yaw"] - aligned_data["servo_yaw"]
 
+    return aligned_data
+
+
+def error_calculate(aligned_data: pd.DataFrame):
+
     pitch_abs_err = aligned_data["pitch_error"].abs()
     yaw_abs_err = aligned_data["yaw_error"].abs()
 
@@ -95,8 +100,6 @@ def evaluation(mocap_path: str = None, servo_path: str = None) -> pd.DataFrame |
     print(f"Yaw 均方根误差 (RMSE):   {np.sqrt((yaw_abs_err ** 2).mean()):.4f}")
     print(f"Yaw 最大绝对误差:        {yaw_abs_err.max():.4f}")
     print("===================================")
-
-    return aligned_data
 
 
 def save_data(aligned_data: pd.DataFrame):
