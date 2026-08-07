@@ -219,6 +219,9 @@ class Orchestrator:
         cfg = self._config.servo
         trajectory = self._make_trajectory(cfg)
         pid = BasePIDController(
+            use_ik=cfg.use_ik_feedforward,
+            direct_gain=cfg.direct_gain,
+            direct_pretension_norm=cfg.direct_pretension_norm,
             pretension_mm=cfg.pretension_mm,
             filter_tau_s=cfg.mocap_filter_tau_s,
         )

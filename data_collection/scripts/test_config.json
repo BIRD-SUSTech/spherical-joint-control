@@ -16,7 +16,10 @@
     "trajectory_period_s": 10,
     "trajectory_steps": 200,
     "calibration_amplitude_deg": 20,
-    "rigid_body_id": 0
+    "rigid_body_id": 0,
+    "use_ik_feedforward": false,
+    "direct_gain": 0.01,
+    "direct_pretension_norm": 0.047
   },
   "output": {
     "root_dir": "data_collection/sessions"

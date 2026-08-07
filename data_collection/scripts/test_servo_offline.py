@@ -1,10 +1,16 @@
 """舵机控制链路离线测试（无需硬件）。
 
-验证 IK 前馈 + PID 反馈 + 归一化输出的数值正确性:
+IK 模式 (BasePIDController 默认):
   1. 中立位 → 四路指令全 0
   2. 无误差保持 → 输出等于同目标的开环指令 (IK 前馈)
   3. 有误差 → 反馈推高指令，且始终在 [-1, 1]
   4. 超限位 → 抛 ValueError
+
+直接模式 (use_ik=False, 无 IK 前馈):
+  5. 中立位 → 全 0 / 预紧偏置全 = bias
+  6. 正向误差 → 对抗对差分 (符号与 IK 一致)
+  7. 对偶对称 → 同对两舵机等量反向
+  8. 大误差 → 指令限幅在 [-1, 1]，不抛错
 
 用法:
     python scripts/test_servo_offline.py
@@ -33,6 +39,50 @@ def _check(name: str, cond: bool, detail: str = "") -> bool:
     status = "PASS" if cond else "FAIL"
     print(f"[{status}] {name}" + (f"  ({detail})" if detail else ""))
     return cond
+
+
+def test_direct_mode() -> bool:
+    """直接模式 (use_ik=False) 数值测试：无 IK 前馈，对抗对差分。"""
+    ok = True
+
+    # 1. 中立位 → 全 0
+    ctrl = BasePIDController(use_ik=False)
+    cmd = ctrl.update(0.0, 0.0, 0.0, 0.0, DT)
+    ok &= _check("直接模式: 中立位指令全 0", np.allclose(cmd, 0.0, atol=1e-6),
+                 f"{np.round(cmd, 6)}")
+
+    # 2. 正向 pitch 误差 → servo_0 负、servo_2 正 (差分, 符号同 IK)
+    ctrl.reset()
+    cmd = ctrl.update(5.0, 0.0, 0.0, 0.0, DT)
+    ok &= _check("直接模式: pitch 误差 → 0负2正",
+                 cmd[0] < 0 and cmd[2] > 0, f"{np.round(cmd, 4)}")
+
+    # 3. 正向 yaw 误差 → servo_1 负、servo_3 正
+    ctrl.reset()
+    cmd = ctrl.update(0.0, 5.0, 0.0, 0.0, DT)
+    ok &= _check("直接模式: yaw 误差 → 1负3正",
+                 cmd[1] < 0 and cmd[3] > 0, f"{np.round(cmd, 4)}")
+
+    # 4. 对偶对称: 同对两舵机等量反向
+    ctrl.reset()
+    cmd = ctrl.update(5.0, 5.0, 0.0, 0.0, DT)
+    sym = np.allclose(cmd[0], -cmd[2], atol=1e-6) and np.allclose(cmd[1], -cmd[3], atol=1e-6)
+    ok &= _check("直接模式: 对偶对称", sym, f"{np.round(cmd, 4)}")
+
+    # 5. 预紧偏置 → 中立位全 = bias
+    ctrl_bias = BasePIDController(use_ik=False, direct_pretension_norm=0.2)
+    cmd = ctrl_bias.update(0.0, 0.0, 0.0, 0.0, DT)
+    ok &= _check("直接模式: 预紧偏置全 = bias", np.allclose(cmd, 0.2, atol=1e-6),
+                 f"{np.round(cmd, 6)}")
+
+    # 6. 大误差 → 指令限幅 [-1,1]，不抛错 (直接模式无 IK 限位)
+    ctrl_clip = BasePIDController(use_ik=False, direct_gain=0.1)
+    ctrl_clip.reset()
+    cmd = ctrl_clip.update(100.0, 0.0, 0.0, 0.0, DT)
+    ok &= _check("直接模式: 指令限幅在 [-1,1]", np.all(np.abs(cmd) <= 1.0 + 1e-9),
+                 f"{np.round(cmd, 4)}")
+
+    return ok
 
 
 def main() -> int:
@@ -73,6 +123,10 @@ def main() -> int:
         all_ok &= _check("超 ±60° 抛 ValueError", False)
     except ValueError:
         all_ok &= _check("超 ±60° 抛 ValueError", True)
+
+    print()
+    print("----- 直接模式 (use_ik=False) -----")
+    all_ok &= test_direct_mode()
 
     print()
     print("所有检查通过 ✓" if all_ok else "存在失败项 ✗")

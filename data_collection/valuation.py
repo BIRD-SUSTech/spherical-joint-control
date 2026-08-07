@@ -5,8 +5,8 @@ import numpy as np
 import matplotlib.pyplot as plt
 import matplotlib.animation as animation
 
-MOTION_CAP_PATH = r"data_collection\sessions\session_20260806_171033\mocap_data.csv"
-SERVO_DATA_PATH = r"data_collection\sessions\session_20260806_171033\servo_data.csv"
+MOTION_CAP_PATH = r"\\BIRD-NAS\shared_data\spherical_joint\data_collection\session_20260806_171033\mocap_data.csv"
+SERVO_DATA_PATH = r"\\BIRD-NAS\shared_data\spherical_joint\data_collection\session_20260806_171033\servo_data.csv"
 TOLERANCE = 50_000_000  # 单位：ns 这里是50毫秒
 
 
@@ -322,7 +322,9 @@ def animate_pitch_yaw_trajectory(aligned_data: pd.DataFrame, save_gif_path: str 
 
 
 if __name__ == "__main__":
-    a = evaluation(MOTION_CAP_PATH, SERVO_DATA_PATH)
-    # save_data(a)
-    # plot_pitch_yaw_trajectory(a)
-    animate_pitch_yaw_trajectory(a)
+    aligned_data = evaluation(MOTION_CAP_PATH, SERVO_DATA_PATH)
+    error_calculate(aligned_data)
+    plot_pitch_yaw_seperated(aligned_data)
+    # save_data(aligned_data)
+    # plot_pitch_yaw_trajectory(aligned_data)
+    # animate_pitch_yaw_trajectory(aligned_data)

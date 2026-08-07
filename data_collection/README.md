@@ -45,8 +45,8 @@ pip install -r requirements.txt   # numpy / bleak / pyserial
 | -------------- | --------------------------------------------------------------------- | -------------------------- |
 | `mocap`        | `server_ip`                                                           | `10.1.1.198`               |
 | `imu`          | `device_address`                                                      | `A5:B2:90:FF:4A:12`        |
-| `force`        | `serial_port`, `slave_address`                                        | `COM5`, `0x01`             |
-| `servo`        | `trajectory_type`, `trajectory_waypoints`, `rigid_body_id`, `enabled` | `idle`, `[]`, `1`, `False` |
+| `force`        | `serial_port`, `slave_address`                                        | `COM6`, `0x01`             |
+| `servo`        | `trajectory_type`, `use_ik_feedforward`, `direct_gain`, `enabled`    | `idle`, `true`, `0.01`, `False` |
 | `output`       | `root_dir`, 各传感器 CSV 开关                                               | `data_collection/sessions` |
 | `orchestrator` | 三阶段时长、超时                                                              | —                          |
 
@@ -76,7 +76,7 @@ pip install -r requirements.txt   # numpy / bleak / pyserial
   "servo": {
     "trajectory_type": "waypoints",
     "trajectory_waypoints": [[0, 0, 5], [10, 0, 5], [0, 0, 5]],
-    "rigid_body_id": 1
+    "rigid_body_id": 0
   }
 }
 ```
@@ -129,7 +129,7 @@ PID 控制线程 (轨迹跟踪时)  ─┘                        │
 
 - 每个采集器在独立 daemon 线程运行，数据经 `queue.Queue` 传递给单一 consumer 线程，避免并发写文件。
 - 队列满时丢弃并累计 `dropped_count`（见 metadata）。
-- PID 控制线程 ~200Hz：读 mocap 姿态反馈 → `BasePIDController`（IK 前馈 + 任务空间 PID）→ 舵机指令。
+- PID 控制线程 ~200Hz：读 mocap 姿态反馈 → `BasePIDController`（IK 前馈 + 任务空间 PID，或 `use_ik_feedforward=false` 直接差分）→ 舵机指令。
 
 ## 舵机控制模块
 
@@ -172,6 +172,32 @@ PID 轨迹跟踪时，设置 `servo.enabled = true` 且配置 `servo.port`，编
 > 默认 `enabled = false`，此时 PID 计算的舵机指令**只记录到 servo CSV，不驱动物理舵机**（安全默认）。
 > 舵机串口无法打开时自动退回 log-only 模式。
 
+### PID 工作模式（IK 前馈 vs 直接差分）
+
+`BasePIDController` 支持两种模式，由 `servo.use_ik_feedforward` 切换：
+
+| 模式 | 控制方式 | 适用场景 |
+| --- | --- | --- |
+| `use_ik_feedforward = true`（默认） | PID 输出修正目标姿态，经 `GeometricIK` 转缆长再转舵机 | 几何 IK 模型与实际运动学一致时 |
+| `use_ik_feedforward = false` | PID 输出**直接**映射为对抗对差分（pitch→servo_0/2, yaw→servo_1/3），不依赖 IK 模型 | IK 模型与实际运动学偏差较大时 |
+
+直接模式示例：
+
+```json
+{
+  "servo": {
+    "use_ik_feedforward": false,
+    "direct_gain": 0.01,
+    "direct_pretension_norm": 0.047
+  }
+}
+```
+
+- **`direct_gain`**：关节 1° 误差需要多少归一化舵机量。默认 `0.01` ≈ 中立位 IK 增益（1°≈0.42mm 缆长）。理论公式 `r_eff(mm) × 0.000412`，推荐用标定脚本实测（见测试指南 §4）。
+- **`direct_pretension_norm`**：中立位预紧偏置，保证对偶缆绳绷紧。`0.047` ≈ 2mm 预紧的归一化等效值。
+- 直接模式的**对偶约束天然满足**：同一对两舵机始终等量反向，不会出现一侧拉满另一侧完全松脱。
+- 纯反馈控制、无模型前馈 → 匀速轨迹会有固有跟踪滞后，靠 PID 积分消除稳态误差。
+
 ## 测试指南
 
 独立测试脚本位于 `data_collection/scripts/`，均无需额外参数，退出码 0=通过。
@@ -189,7 +215,7 @@ python data_collection/scripts/test_servo_offline.py
 ```bash
 python data_collection/scripts/test_mocap.py [--ip 10.1.1.198] [--duration 5]
 python data_collection/scripts/test_imu.py   [--timeout 20]
-python data_collection/scripts/test_force.py [--port COM5] [--debug]
+python data_collection/scripts/test_force.py [--port COM6] [--debug]
 ```
 
 - **mocap**：确认能连服务器、有帧、可见目标刚体（球杆需预先建好 rigid body，ID 与 `servo.rigid_body_id` 一致）
@@ -215,6 +241,23 @@ python -m data_collection.main run -c data_collection/scripts/test_config.json
 
 验证 `servo_data.csv` 按 ~200Hz 写入、`joint_angle_*` 中目标与实际姿态逼近。
 **必须开启 mocap**——PID 依赖 mocap 姿态反馈；`--no-mocap` 时反馈恒为 0，指令会推满。
+
+### 4. direct_gain 标定（需要舵机串口 + 动捕）
+
+直接模式（`use_ik_feedforward = false`）下，`direct_gain` 表示"关节转 1° 需要多少归一化舵机量"。
+用标定脚本实测真实增益：
+
+```bash
+python data_collection/scripts/calibrate_direct_gain.py --port COM5 --amp 0.05 --bias 0.05
+```
+
+流程：捕获中立参考四元数 → 给 pitch 对抗对施加 `±amp` 差分 → 动捕实测稳态转角 →
+计算 `gain = amp / 转角`；yaw 轴同理。脚本输出 `gain_pitch` / `gain_yaw` /
+建议 `direct_gain`（两轴均值）及可直接粘贴的 JSON 配置示例。
+
+- `--amp` 默认 0.05（约 5° 关节运动，安全）；`--bias` 默认 0.05 保持缆绳预紧
+- 标定期间球杆会运动，请确认无干涉；结束后舵机自动回中位
+- 若某轴转动方向与预期相反（Δ 为负），脚本会提示检查舵机接线/指令符号
 
 ### 实机测试注意事项
 

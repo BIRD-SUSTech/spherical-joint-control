@@ -66,6 +66,10 @@ class ServoConfig:
     mocap_filter_tau_s: float = 0.0          # 动捕反馈 EMA 滤波时间常数 (s)，0=关闭
     rigid_body_id: int = 0             # 用于姿态反馈的 mocap 刚体 ID
     servo_ids: list[int] = field(default_factory=lambda: [0, 1, 2, 3])
+    # PID 工作模式
+    use_ik_feedforward: bool = True          # False = 直接对抗对差分，不依赖 IK 模型
+    direct_gain: float = 0.01                # IK 关闭时 deg → norm 增益
+    direct_pretension_norm: float = 0.0      # IK 关闭时中立位预紧偏置 (归一化)
 
 
 @dataclass
