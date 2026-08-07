@@ -84,7 +84,7 @@ class Orchestrator:
         self._session_paths: Optional[SessionPaths] = None
 
         # 统计
-        self._consumer_done = threading.Event()
+        self._servo_dropped = 0
 
     # ------------------------------------------------------------------
     # 公开入口
@@ -117,26 +117,37 @@ class Orchestrator:
         # 5. 启动采集线程
         self._start_collectors()
 
-        # 6. 启动 consumer 线程
-        consumer_thread = threading.Thread(
-            target=self._consumer_loop, name="Consumer", daemon=True
-        )
-        consumer_thread.start()
+        # 6. 启动 consumer 线程 — 每个传感器独立写 CSV，并行驶入 NAS
+        consumer_threads: list[threading.Thread] = []
+        for name, queue_obj, writer in [
+            ("mocap", self._q_mocap, self._writers.get("mocap")),
+            ("imu",   self._q_imu,   self._writers.get("imu")),
+            ("force", self._q_force, self._writers.get("force")),
+            ("servo", self._q_servo, self._writers.get("servo")),
+        ]:
+            if writer is None:
+                continue
+            t = threading.Thread(
+                target=self._single_consumer,
+                args=(name, queue_obj, writer),
+                name=f"Consumer-{name}",
+            )
+            t.start()
+            consumer_threads.append(t)
+        logger.info("%d consumer threads started", len(consumer_threads))
 
         # 7. 阶段管理：静止段 → 标定段 → 探索段
         self._run_phases()
 
-        # 8. 停止采集器
+        # 8. 停止采集器 → consumers 排空队列后退出
         logger.info("Stopping collectors...")
         self._stop_event.set()
         self._stop_collectors()
+        for t in consumer_threads:
+            t.join()
+        logger.info("All consumer threads stopped")
 
-        # 9. 排空队列
-        self._drain_queues()
-        self._consumer_done.set()
-        consumer_thread.join(timeout=3.0)
-
-        # 10. 清理资源
+        # 9. 落盘并关闭 CSV
         self._cleanup()
 
         # 11. 写元数据
@@ -186,7 +197,8 @@ class Orchestrator:
         if cfg.output.enable_mocap_csv:
             try:
                 self._mocap = MocapCollector(
-                    cfg.mocap, self._q_mocap, self._start_event, self._stop_event
+                    cfg.mocap, self._q_mocap, self._start_event, self._stop_event,
+                    pose_callback=self._update_pose_from_mocap,
                 )
             except Exception:
                 logger.exception("Failed to create MocapCollector (SDK not installed?)")
@@ -221,6 +233,11 @@ class Orchestrator:
         pid = BasePIDController(
             pretension_mm=cfg.pretension_mm,
             filter_tau_s=cfg.mocap_filter_tau_s,
+            pitch_kp=cfg.pitch_kp,
+            pitch_ki=cfg.pitch_ki,
+            yaw_kp=cfg.yaw_kp,
+            yaw_ki=cfg.yaw_ki,
+            integral_max=cfg.integral_max,
         )
         self._open_loop = OpenLoopController(pretension_mm=cfg.pretension_mm)
 
@@ -393,40 +410,37 @@ class Orchestrator:
         try:
             self._q_servo.put_nowait(state)
         except queue.Full:
-            pass
+            self._servo_dropped += 1
 
     # ------------------------------------------------------------------
     # Consumer 线程
     # ------------------------------------------------------------------
 
-    def _consumer_loop(self) -> None:
-        """从所有输出队列中读取数据并写入 CSV。"""
-        active = {
-            "mocap": (self._q_mocap, self._writers.get("mocap")),
-            "imu": (self._q_imu, self._writers.get("imu")),
-            "force": (self._q_force, self._writers.get("force")),
-            "servo": (self._q_servo, self._writers.get("servo")),
-        }
-
+    def _single_consumer(
+        self, name: str, q: queue.Queue, writer: CsvWriter,
+    ) -> None:
+        """单传感器 consumer：读队列 → 写 CSV，stop_event 后排空再退出。"""
         while not self._stop_event.is_set():
-            got_any = False
-            for name, (q, writer) in active.items():
-                try:
-                    item = q.get(timeout=0.05)
-                    if writer is not None:
-                        self._write_item(writer, item)
-                    got_any = True
-                except queue.Empty:
-                    continue
-            # 避免空转
-            if not got_any:
-                time.sleep(0.005)
+            try:
+                item = q.get(timeout=0.1)
+                self._write_item(writer, item)
+            except queue.Empty:
+                continue
+
+        # 排空残余
+        while True:
+            try:
+                item = q.get_nowait()
+                self._write_item(writer, item)
+            except queue.Empty:
+                break
+        logger.info("Consumer-%s stopped, %d rows written", name, writer.row_count)
 
     def _write_item(self, writer: CsvWriter, item) -> None:
         phase_str = self._current_phase()
 
         if isinstance(item, MocapFrame):
-            self._update_pose_from_mocap(item)
+            # pose 已在 mocap 采集线程中通过回调更新，这里只写 CSV
             rows = item.to_csv_rows()
             for row in rows:
                 row["phase"] = phase_str
@@ -468,34 +482,6 @@ class Orchestrator:
             self._servo.emergency_stop()
             self._servo.disconnect()
 
-    def _drain_queues(self) -> None:
-        """排空队列中剩余的数据。"""
-        drain_timeout = self._config.orchestrator.drain_timeout_s
-        deadline = time.perf_counter() + drain_timeout
-        queues = [self._q_mocap, self._q_imu, self._q_force, self._q_servo]
-        writers = {
-            id(self._q_mocap): self._writers.get("mocap"),
-            id(self._q_imu): self._writers.get("imu"),
-            id(self._q_force): self._writers.get("force"),
-            id(self._q_servo): self._writers.get("servo"),
-        }
-        drained = 0
-        while time.perf_counter() < deadline:
-            got = False
-            for q in queues:
-                try:
-                    item = q.get_nowait()
-                    w = writers.get(id(q))
-                    if w:
-                        self._write_item(w, item)
-                    drained += 1
-                    got = True
-                except queue.Empty:
-                    pass
-            if not got:
-                break
-        logger.info("Drained %d remaining items from queues", drained)
-
     def _cleanup(self) -> None:
         for w in self._writers.values():
             if w:
@@ -519,6 +505,7 @@ class Orchestrator:
             row_counts["imu_raw"] = self._imu.row_count
         if self._force:
             dropped["force"] = self._force.dropped_count
+        dropped["servo"] = self._servo_dropped
 
         metadata = {
             "session_dir": str(sp.dir),

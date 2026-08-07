@@ -16,14 +16,19 @@
     "trajectory_period_s": 10,
     "trajectory_steps": 200,
     "calibration_amplitude_deg": 20,
+    "pitch_kp": 0.7,
+    "pitch_ki": 0.08,
+    "yaw_kp": 0.9,
+    "yaw_ki": 0.12,
+    "integral_max": 8.0,
     "rigid_body_id": 0
   },
   "output": {
-    "root_dir": "data_collection/sessions"
+    "root_dir": "//BIRD-NAS/shared_data/spherical_joint/data_collection"
   },
   "orchestrator": {
     "static_duration_s": 5,
     "calibration_duration_s": 5,
-    "exploration_duration_s": 35
+    "exploration_duration_s": 60
   }
 }

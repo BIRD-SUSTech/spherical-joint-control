@@ -10,7 +10,7 @@ import queue
 import threading
 import time
 import traceback
-from typing import Optional
+from typing import Callable, Optional
 
 from nokov import nokovsdk
 
@@ -41,11 +41,13 @@ class MocapCollector:
         output_queue: queue.Queue,
         start_event: threading.Event,
         stop_event: threading.Event,
+        pose_callback: Callable[[MocapFrame], None] | None = None,
     ):
         self._config = config
         self._output_queue = output_queue
         self._start_event = start_event
         self._stop_event = stop_event
+        self._pose_callback = pose_callback
         self._client = nokovsdk.PySDKClient()
         self._thread: Optional[threading.Thread] = None
         self._lock = threading.Lock()
@@ -101,6 +103,13 @@ class MocapCollector:
 
                 mocap_frame = self._extract(frame_data)
                 if mocap_frame is not None:
+                    # 快路径：直接更新姿态（旁路 consumer，不受 NAS I/O 影响）
+                    if self._pose_callback:
+                        try:
+                            self._pose_callback(mocap_frame)
+                        except Exception:
+                            pass
+                    # 慢路径：入队 → consumer → CSV 写盘
                     try:
                         self._output_queue.put_nowait(mocap_frame)
                     except queue.Full:

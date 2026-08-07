@@ -31,7 +31,7 @@ class CsvWriter:
         self._path.parent.mkdir(parents=True, exist_ok=True)
         is_new = not self._path.exists() or self._path.stat().st_size == 0
         self._file = open(
-            self._path, "a", newline="", encoding="utf-8", buffering=1
+            self._path, "a", newline="", encoding="utf-8", buffering=1024 * 1024,
         )
         self._writer = csv.DictWriter(self._file, fieldnames=self._fieldnames)
         if is_new:

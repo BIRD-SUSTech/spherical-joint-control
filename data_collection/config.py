@@ -64,20 +64,25 @@ class ServoConfig:
     pretension_mm: float = 2.0               # 线缆预紧量，正值=缩短，防松弛脱盘
     # PID 反馈
     mocap_filter_tau_s: float = 0.0          # 动捕反馈 EMA 滤波时间常数 (s)，0=关闭
+    pitch_kp: float = 0.4
+    pitch_ki: float = 0.05
+    yaw_kp: float = 0.5
+    yaw_ki: float = 0.08
+    integral_max: float = 5.0
     rigid_body_id: int = 0             # 用于姿态反馈的 mocap 刚体 ID
     servo_ids: list[int] = field(default_factory=lambda: [0, 1, 2, 3])
 
 
 @dataclass
 class OutputConfig:
-    root_dir: Path = Path("data_collection/sessions")
+    root_dir: Path = Path("//BIRD-NAS/shared_data/spherical_joint/data_collection")
     session_prefix: str = "session"
     enable_mocap_csv: bool = True
     enable_imu_csv: bool = True
     enable_force_csv: bool = True
     enable_servo_csv: bool = True
     queue_maxsize: int = 5000
-    flush_interval_rows: int = 10
+    flush_interval_rows: int = 500
 
 
 @dataclass
@@ -87,7 +92,7 @@ class OrchestratorConfig:
     exploration_duration_s: Optional[float] = None  # None = unlimited
     startup_timeout_s: float = 30.0
     shutdown_timeout_s: float = 5.0
-    drain_timeout_s: float = 3.0
+    drain_timeout_s: float = 30.0
     progress_report_interval_s: float = 5.0
 
 

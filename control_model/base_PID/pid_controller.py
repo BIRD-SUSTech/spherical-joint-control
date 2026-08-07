@@ -100,10 +100,19 @@ class BasePIDController:
         pretension_mm: float = 0.0,
         antagonistic_max_diff: float = 0.10,
         filter_tau_s: float = 0.05,
+        pitch_kp: float = 1.0,
+        pitch_ki: float = 0.3,
+        yaw_kp: float = 1.5,
+        yaw_ki: float = 0.5,
+        integral_max: float = 15.0,
     ):
         self._ik = GeometricIK()
-        self._pid_pitch = pitch_pid or PID(PIDGains(Kp=1.0, Ki=0.3, integral_max=15.0))
-        self._pid_yaw = yaw_pid or PID(PIDGains(Kp=1.0, Ki=0.3, integral_max=15.0))
+        self._pid_pitch = pitch_pid or PID(
+            PIDGains(Kp=pitch_kp, Ki=pitch_ki, integral_max=integral_max),
+        )
+        self._pid_yaw = yaw_pid or PID(
+            PIDGains(Kp=yaw_kp, Ki=yaw_ki, integral_max=integral_max),
+        )
         self._drum_radius = drum_radius_mm or self.DRUM_RADIUS_MM
         self._pretension_mm = pretension_mm
         self._antagonistic_max_diff = antagonistic_max_diff
