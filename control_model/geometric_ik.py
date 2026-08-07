@@ -163,3 +163,26 @@ class GeometricIK:
             _great_circle_arc(self._P_fix[i], P_ball_rotated[i])
             for i in range(4)
         ])
+
+    def jacobian(self, pitch_deg: float, yaw_deg: float, h: float = 0.1) -> NDArray:
+        """数值中心差分 Jacobian: d(ΔL) / d(pitch, yaw)，shape (4, 2).
+
+        Args:
+            pitch_deg: 当前 pitch (度).
+            yaw_deg: 当前 yaw (度).
+            h: 差分步长 (度).
+
+        Returns:
+            J[i, 0] = ∂ΔL_i / ∂pitch, J[i, 1] = ∂ΔL_i / ∂yaw (mm/度).
+
+        Raises:
+            ValueError: 若差分点超出 ±60° 结构限位.
+        """
+        J = np.zeros((4, 2))
+        Lp = self.solve(pitch_deg + h, yaw_deg)
+        Lm = self.solve(pitch_deg - h, yaw_deg)
+        J[:, 0] = (Lp - Lm) / (2 * h)
+        Ly = self.solve(pitch_deg, yaw_deg + h)
+        Ln = self.solve(pitch_deg, yaw_deg - h)
+        J[:, 1] = (Ly - Ln) / (2 * h)
+        return J
