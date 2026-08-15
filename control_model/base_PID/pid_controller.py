@@ -103,7 +103,6 @@ class BasePIDController:
         yaw_pid: PID | None = None,
         drum_radius_mm: float | None = None,
         pretension_mm: float = 0.0,
-        antagonistic_max_diff: float = 0.10,
         filter_tau_s: float = 0.05,
         pitch_kp: float = 1.0,
         pitch_ki: float = 0.3,
@@ -123,7 +122,6 @@ class BasePIDController:
         )
         self._drum_radius = drum_radius_mm or self.DRUM_RADIUS_MM
         self._pretension_mm = pretension_mm
-        self._antagonistic_max_diff = antagonistic_max_diff
         self._filter_tau_s = filter_tau_s
         self._use_ik = use_ik
         self._direct_gain = direct_gain
@@ -235,32 +233,10 @@ class BasePIDController:
         """缆长变化量 → 归一化舵机角度 [-1, 1].
 
         ΔL > 0 表示缆绳需放长，但舵机正角度对应缆绳缩短，
-        因此取负号翻转方向。预紧偏置使中立位时缆绳略有拉力，
-        拮抗约束防止对侧缆绳过度松弛。
+        因此取负号翻转方向。预紧偏置使中立位时缆绳略有拉力。
         """
         # 减去预紧量：中立位(ΔL=0)时舵机会轻微缩短，保持线缆绷紧
         biased = delta_L_mm - self._pretension_mm
         delta_theta_deg = biased / self._drum_radius * (180.0 / np.pi)
         norm = -delta_theta_deg / self.SERVO_HALF_DEG
-        return self._apply_antagonistic_constraint(norm)
-
-    def _apply_antagonistic_constraint(self, norm: NDArray) -> NDArray:
-        """拮抗对约束：防止对侧缆绳过度松弛。
-
-        servo_1↔servo_3 (pitch) 和 servo_2↔servo_4 (yaw) 为拮抗对，
-        放长侧不得低于 pretension_bias - max_diff，不足时从对侧补偿。
-        仅在预紧启用时生效。
-        """
-        if self._pretension_mm <= 0:
-            return norm
-        bias = (self._pretension_mm / self._drum_radius
-                * (180.0 / np.pi) / self.SERVO_HALF_DEG)
-        min_allowed = bias - self._antagonistic_max_diff
-        result = norm.copy()
-        for i, j in [(0, 2), (1, 3)]:
-            for src, dst in [(i, j), (j, i)]:
-                if result[src] < min_allowed:
-                    deficit = min_allowed - result[src]
-                    result[src] = min_allowed
-                    result[dst] -= deficit
-        return result
+        return norm
