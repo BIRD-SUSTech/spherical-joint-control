@@ -407,8 +407,10 @@ class Orchestrator:
             pc_timestamp_ns=now_ns,
             pc_receive_unix_time_ms=now_ms,
             target_angles=list(servo_norm),
-            estimated_cable_lengths=[target_pitch, target_yaw, current_pitch, current_yaw],
-            estimated_joint_angles=[target_pitch, target_yaw],
+            target_pitch=target_pitch,
+            target_yaw=target_yaw,
+            current_pitch=current_pitch,
+            current_yaw=current_yaw,
         )
         try:
             self._q_servo.put_nowait(state)

@@ -1,5 +1,20 @@
+"""轨迹跟踪误差评估与可视化。
+
+两种数据来源（自动识别）：
+- 双文件模式：servo_data.csv（目标 target_pitch/target_yaw）+ mocap_data.csv（实测，四元数转姿态）
+- 单文件模式：feedback_control 日志（target_* 为目标、current_* 为动捕实测）
+
+用法：
+    # 单文件：feedback_control 日志
+    python -m data_collection.valuation --servo feedback_control/logs/closed_loop_xxx.csv
+
+    # 双文件：data_collection 会话
+    python -m data_collection.valuation --servo <session>/servo_data.csv --mocap <session>/mocap_data.csv
+"""
+
 from data_collection.orchestrator import _quat_to_pitch_yaw
 import datetime
+import os
 import pandas as pd
 import numpy as np
 import matplotlib.pyplot as plt
@@ -10,80 +25,120 @@ SERVO_DATA_PATH = r"\\BIRD-NAS\shared_data\spherical_joint\data_collection\sessi
 TOLERANCE = 50_000_000  # 单位：ns 这里是50毫秒
 
 
+def _pick_col(df: pd.DataFrame, names: list[str]) -> pd.Series | None:
+    """按候选名依次取列，找不到返回 None。"""
+    for n in names:
+        if n in df.columns:
+            return df[n]
+    return None
+
+
+def _pick_time_col(df: pd.DataFrame) -> str:
+    """时间列：优先 pc_timestamp_ns（data_collection），其次 t_s（feedback_control）。"""
+    for n in ("pc_timestamp_ns", "t_s"):
+        if n in df.columns:
+            return n
+    return df.columns[0]
+
+
 def evaluation(mocap_path: str = None, servo_path: str = None) -> pd.DataFrame | None:
-    if mocap_path is None or servo_path is None:
-        print("请提供mocap和servo的csv路径")
+    """轨迹跟踪误差评估。
+
+    Args:
+        mocap_path: mocap CSV 路径（双文件模式）；None = 单文件模式
+            （servo_path 为 feedback_control 日志，current_* 即动捕实测）。
+        servo_path: servo CSV 路径（servo_data.csv 或 feedback_control 日志）。
+
+    Returns:
+        DataFrame: time, servo_pitch, servo_yaw, mocap_pitch, mocap_yaw,
+                   pitch_error, yaw_error (servo_* = 目标, mocap_* = 实测).
+    """
+    if servo_path is None:
+        print("请提供 servo csv 路径 (servo_data.csv 或 feedback_control 日志)")
         return None
 
-    mocap_df = pd.read_csv(mocap_path)
     servo_df = pd.read_csv(servo_path)
+    time_col = _pick_time_col(servo_df)
 
-    # 动捕的一些数据
-    mocap_time = mocap_df.iloc[:, 0]
-    qx_series = mocap_df.iloc[:, 8]
-    qy_series = mocap_df.iloc[:, 9]
-    qz_series = mocap_df.iloc[:, 10]
-    qw_series = mocap_df.iloc[:, 11]
-    mocap_state = mocap_df.iloc[:, 12]
+    # 目标姿态（新列名，兼容旧会话的 joint_angle_*_deg）
+    target_pitch = _pick_col(servo_df, ["target_pitch", "joint_angle_1_deg"])
+    target_yaw = _pick_col(servo_df, ["target_yaw", "joint_angle_2_deg"])
+    if target_pitch is None or target_yaw is None:
+        print("servo csv 缺少目标姿态列 (target_pitch/target_yaw 或旧名 joint_angle_*_deg)")
+        return None
 
-    # 舵机的预期数据
-    servo_time = servo_df.iloc[:, 0]
-    servo_pitch = servo_df.iloc[:, 10]
-    servo_yaw = servo_df.iloc[:, 11]
+    if mocap_path is None:
+        # ---- 单文件模式：feedback_control 日志 ----
+        current_pitch = _pick_col(servo_df, ["current_pitch", "pitch"])
+        current_yaw = _pick_col(servo_df, ["current_yaw", "yaw"])
+        if current_pitch is None or current_yaw is None:
+            print("单文件模式需要 current_pitch/current_yaw 列")
+            return None
+        print(f"[单文件模式] {servo_path}  (current_* 视为动捕实测)")
+        aligned = pd.DataFrame({
+            "time": servo_df[time_col],
+            "servo_pitch": target_pitch,
+            "servo_yaw": target_yaw,
+            "mocap_pitch": current_pitch,
+            "mocap_yaw": current_yaw,
+        }).sort_values("time").reset_index(drop=True)
+    else:
+        # ---- 双文件模式：mocap + servo ----
+        print(f"[双文件模式] servo={servo_path}, mocap={mocap_path}")
+        mocap_df = pd.read_csv(mocap_path)
+        if time_col not in mocap_df.columns:
+            print(f"mocap csv 缺少时间列 {time_col}")
+            return None
 
-    # 设置参考坐标系
-    ref_q = np.array(
-        [qw_series.iloc[0], qx_series.iloc[0], qy_series.iloc[0], qz_series.iloc[0]]
-    )
+        # 参考坐标系：动捕首帧四元数
+        ref_q = np.array([
+            mocap_df["rigid_body_qw"].iloc[0],
+            mocap_df["rigid_body_qx"].iloc[0],
+            mocap_df["rigid_body_qy"].iloc[0],
+            mocap_df["rigid_body_qz"].iloc[0],
+        ])
 
-    # 把四元数变成pitch和yaw数据
-    mocap_pitch_list = []
-    mocap_yaw_list = []
+        mocap_pitch_list = []
+        mocap_yaw_list = []
+        for _, row in mocap_df.iterrows():
+            pitch, yaw = _quat_to_pitch_yaw(
+                row["rigid_body_qx"], row["rigid_body_qy"],
+                row["rigid_body_qz"], row["rigid_body_qw"],
+                ref_quat=ref_q,
+            )
+            mocap_pitch_list.append(pitch)
+            mocap_yaw_list.append(yaw)
 
-    for i in range(len(mocap_df)):
-        pitch, yaw = _quat_to_pitch_yaw(
-            qx_series.iloc[i],
-            qy_series.iloc[i],
-            qz_series.iloc[i],
-            qw_series.iloc[i],
-            ref_quat=ref_q,
-        )
-        mocap_pitch_list.append(pitch)
-        mocap_yaw_list.append(yaw)
-
-    # 将数据重新封装成pd.DataFrame类
-    mocap_clean = pd.DataFrame(
-        {
-            "time": mocap_time,
+        mocap_clean = pd.DataFrame({
+            "time": mocap_df[time_col],
             "mocap_pitch": mocap_pitch_list,
             "mocap_yaw": mocap_yaw_list,
-            "mocap_state": mocap_state,
-        }
-    ).sort_values("time")
+            "mocap_state": mocap_df["phase"] if "phase" in mocap_df.columns else "exploration",
+        }).sort_values("time")
 
-    servo_clean = pd.DataFrame(
-        {"time": servo_time, "servo_pitch": servo_pitch, "servo_yaw": servo_yaw}
-    ).sort_values("time")
+        servo_clean = pd.DataFrame({
+            "time": servo_df[time_col],
+            "servo_pitch": target_pitch,
+            "servo_yaw": target_yaw,
+        }).sort_values("time")
 
-    # 数据戳对齐（基于邻近策略）
-    aligned_data = pd.merge_asof(
-        left=servo_clean,
-        right=mocap_clean,
-        on="time",
-        direction="nearest",
-        tolerance=TOLERANCE,
-    )
-    aligned_data = aligned_data.dropna().reset_index(drop=True)
-    aligned_data = aligned_data[aligned_data["mocap_state"] == "exploration"]
-    aligned_data = aligned_data.reset_index(drop=True)
+        # 数据戳对齐（基于邻近策略）
+        aligned = pd.merge_asof(
+            left=servo_clean,
+            right=mocap_clean,
+            on="time",
+            direction="nearest",
+            tolerance=TOLERANCE,
+        )
+        aligned = aligned.dropna().reset_index(drop=True)
+        if "mocap_state" in aligned.columns:
+            aligned = aligned[aligned["mocap_state"] == "exploration"].reset_index(drop=True)
 
-    # 误差计算（观测值-期望值）
-    aligned_data["pitch_error"] = (
-        aligned_data["mocap_pitch"] - aligned_data["servo_pitch"]
-    )
-    aligned_data["yaw_error"] = aligned_data["mocap_yaw"] - aligned_data["servo_yaw"]
+    # 误差计算（实测值 - 目标值）
+    aligned["pitch_error"] = aligned["mocap_pitch"] - aligned["servo_pitch"]
+    aligned["yaw_error"] = aligned["mocap_yaw"] - aligned["servo_yaw"]
 
-    return aligned_data
+    return aligned
 
 
 def error_calculate(aligned_data: pd.DataFrame):
@@ -102,12 +157,12 @@ def error_calculate(aligned_data: pd.DataFrame):
     print("===================================")
 
 
-def save_data(aligned_data: pd.DataFrame):
-
-    aligned_data.to_csv(
-        f"./data_collection/outputs/output_{datetime.datetime.now().strftime('%Y%m%d_%H%M%S')}.csv",
-        index=False,
-    )
+def save_data(aligned_data: pd.DataFrame, path: str = None):
+    if path is None:
+        path = f"./data_collection/outputs/output_{datetime.datetime.now().strftime('%Y%m%d_%H%M%S')}.csv"
+    os.makedirs(os.path.dirname(path) or ".", exist_ok=True)
+    aligned_data.to_csv(path, index=False)
+    print(f"对齐数据已保存: {path}")
 
 
 def plot_pitch_yaw_seperated(aligned_data: pd.DataFrame):
@@ -322,9 +377,38 @@ def animate_pitch_yaw_trajectory(aligned_data: pd.DataFrame, save_gif_path: str 
 
 
 if __name__ == "__main__":
-    aligned_data = evaluation(MOTION_CAP_PATH, SERVO_DATA_PATH)
-    error_calculate(aligned_data)
-    plot_pitch_yaw_seperated(aligned_data)
-    # save_data(aligned_data)
-    # plot_pitch_yaw_trajectory(aligned_data)
-    # animate_pitch_yaw_trajectory(aligned_data)
+    import argparse
+
+    parser = argparse.ArgumentParser(description="轨迹跟踪误差评估与可视化")
+    parser.add_argument("--servo", default=SERVO_DATA_PATH,
+                        help="servo_data.csv 或 feedback_control 日志 csv 路径")
+    parser.add_argument("--mocap", default=None,
+                        help="mocap_data.csv 路径；省略则为单文件模式 (feedback_control 日志)")
+    parser.add_argument("--plot", choices=("separated", "trajectory", "animate", "none"),
+                        default="separated", help="可视化方式")
+    parser.add_argument("--save", default=None, help="对齐结果另存 csv 路径")
+    parser.add_argument("--gif", default=None, help="--plot animate 时 GIF 保存路径")
+    args = parser.parse_args()
+
+    # 双文件模式仅当显式给出 --mocap，或默认 NAS 路径真实存在时启用
+    mocap_path = args.mocap
+    if mocap_path is None:
+        mocap_path = MOTION_CAP_PATH if os.path.exists(MOTION_CAP_PATH) else None
+
+    aligned = evaluation(mocap_path, args.servo)
+    if aligned is None or aligned.empty:
+        print("无有效对齐数据，退出")
+        raise SystemExit(1)
+
+    error_calculate(aligned)
+    if args.save:
+        save_data(aligned, args.save)
+
+    if args.plot == "none":
+        pass
+    elif args.plot == "trajectory":
+        plot_pitch_yaw_trajectory(aligned)
+    elif args.plot == "animate":
+        animate_pitch_yaw_trajectory(aligned, save_gif_path=args.gif)
+    else:
+        plot_pitch_yaw_seperated(aligned)

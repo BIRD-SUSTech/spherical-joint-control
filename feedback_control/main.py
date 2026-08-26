@@ -44,13 +44,14 @@ logger = logging.getLogger(__name__)
 
 # ---- 可调参数（起始值，需实机整定）----
 KP = 3.0
-KI = 0.3
+KI = 0.2
 KD = 0.8
 DEADBAND = 0.2
 ALPHA = 0.3
 LOOP_HZ = 100
-FLIP_PITCH = False   # 若 pitch 方向反了改 True
-FLIP_YAW = False     # 若 yaw 方向反了改 True
+FLIP_PITCH = True    # 实机验证：舵机实际运转方向与指令相反，pitch 指令取反
+FLIP_YAW = True      # 实机验证：舵机实际运转方向与指令相反，yaw 指令取反
+PRETENSION_DEG = -10  # 预紧偏置（°），4 路指令统一减，只收紧缆绳不移动关节（参考 0.047norm≈6.4°）
 
 
 class SerialSink:
@@ -152,8 +153,13 @@ def main() -> int:
     csv_path = log_dir / f"closed_loop_{datetime.now().strftime('%Y%m%d_%H%M%S')}.csv"
     f = open(csv_path, "w", newline="")
     writer = csv.writer(f)
+    # 列格式与 data_collection/valuation.py 兼容：
+    #   target_* = 目标姿态, current_* = 动捕实测, servo_*_target_deg = 最终舵机指令
     writer.writerow(["t_s", "target_pitch", "target_yaw",
-                     "pitch", "yaw", "out_pitch", "out_yaw"])
+                     "current_pitch", "current_yaw",
+                     "out_pitch", "out_yaw",
+                     "servo_1_target_deg", "servo_2_target_deg",
+                     "servo_3_target_deg", "servo_4_target_deg"])
 
     mode = "mock" if args.mock else ("dry-run" if args.dry_run else f"串口 {args.port}")
     logger.info("控制回路启动（%dHz），模式=%s", LOOP_HZ, mode)
@@ -173,12 +179,14 @@ def main() -> int:
             out_pitch = pid_pitch.calculate(pose.pitch)
             out_yaw = pid_yaw.calculate(pose.yaw)
 
-            angles = coupled_angles(out_pitch, out_yaw, FLIP_PITCH, FLIP_YAW)
+            angles = coupled_angles(out_pitch, out_yaw, FLIP_PITCH, FLIP_YAW,
+                                    PRETENSION_DEG)
             sink.send(format_command(angles))
 
             writer.writerow([round(t, 4), round(t_pitch, 4), round(t_yaw, 4),
                              round(pose.pitch, 4), round(pose.yaw, 4),
-                             round(out_pitch, 4), round(out_yaw, 4)])
+                             round(out_pitch, 4), round(out_yaw, 4),
+                             *angles])
 
             next_t += dt
             sleep_s = next_t - time.perf_counter()

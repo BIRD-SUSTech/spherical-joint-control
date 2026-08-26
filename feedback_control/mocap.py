@@ -5,10 +5,12 @@
 与参考 CloseLoop 一致）；扩展数据缺失时退化为“首帧四元数为参考 + 四元数分解”。
 
 命名约定（沿用当前系统的 pitch / yaw）：
-    pitch = DOF1 = 绕 X 轴倾斜 = 舵机对 1↔3 = SDK 扩展数据的 pitch
-    yaw   = DOF2 = 绕 Y 轴倾斜 = 舵机对 2↔4 = SDK 扩展数据的 roll
-    （SDK 的 roll 即绕 Y 轴倾斜，与本项目命名 yaw 是同一物理量；
-      SDK 的 yaw 是绕 Z 轴自转，绳驱不可控、不使用。）
+    pitch = DOF1 = 绕 X 轴倾斜 = 舵机对 1↔3
+    yaw   = DOF2 = 绕 Y 轴倾斜 = 舵机对 2↔4
+实机验证（--dry-run 手动把球杆偏向 1 号舵机，几何定义应为 pitch<0、yaw≈0）：
+    SDK 扩展数据实测 pitch≈0、roll<0，说明 SDK 的 roll/pitch 与本项目
+    pitch/yaw 正好互换，读取时必须交换（pitch←roll, yaw←pitch）。
+    （SDK 的 yaw 是绕 Z 轴自转，绳驱不可控、不使用。）
 """
 
 from __future__ import annotations
@@ -97,7 +99,7 @@ class MocapReader:
             rb = frame.RigidBodies[self.rigid_body_index]
             qx, qy, qz, qw = rb.qx, rb.qy, rb.qz, rb.qw
 
-        # 2) 优先取 SDK 扩展欧拉角（pitch→pitch, roll→yaw）
+        # 2) 优先取 SDK 扩展欧拉角（交换：pitch←roll, yaw←pitch，见模块 docstring）
         got_euler = False
         try:
             fext = frame.FrameExtendData
@@ -106,7 +108,7 @@ class MocapReader:
                     ext = fext.extendData[i]
                     if self.rigid_body_index < ext.number:
                         rb_ext = ext.ExtendDataUnion.RigidBodyExtendData[self.rigid_body_index]
-                        pitch, yaw = rb_ext.pitch, rb_ext.roll
+                        pitch, yaw = rb_ext.roll, rb_ext.pitch
                         got_euler = True
                     break
         except Exception:

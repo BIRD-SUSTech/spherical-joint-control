@@ -48,7 +48,12 @@ def main() -> int:
     angles2 = coupled_angles(999.0, 0.0)
     ok &= check("限幅 ±135", angles2 == [135, 0, -135, 0], f"{angles2}")
 
-    # 6. 四元数 ↔ (pitch,yaw) 严格对应（回归：曾把 R[1,2] 元素写错）
+    # 6. 预紧偏置：4 路统一减，不改变对偶差动（s1−s3、s2−s4 不变）
+    angles3 = coupled_angles(30.0, -20.0, pretension_deg=6.0)
+    diff_ok = (angles3[0] - angles3[2] == 60 and angles3[1] - angles3[3] == -40)
+    ok &= check("预紧偏置统一减", angles3 == [24, -26, -36, 14] and diff_ok, f"{angles3}")
+
+    # 7. 四元数 ↔ (pitch,yaw) 严格对应（回归：曾把 R[1,2] 元素写错）
     known = [
         # (qw, qx, qy, qz, 期望 pitch, 期望 yaw)
         (0.987672114351, 0.086410113286, 0.130029500652, -0.011376107231, 10.0, 15.0),

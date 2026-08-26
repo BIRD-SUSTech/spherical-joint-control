@@ -353,8 +353,8 @@ SERVO_CSV_COLUMNS = [
     "pc_timestamp_ns",
     "pc_receive_unix_time_ms",
     "servo_1_target_deg", "servo_2_target_deg", "servo_3_target_deg", "servo_4_target_deg",
-    "cable_1_length_mm", "cable_2_length_mm", "cable_3_length_mm", "cable_4_length_mm",
-    "joint_angle_1_deg", "joint_angle_2_deg",
+    "target_pitch", "target_yaw",
+    "current_pitch", "current_yaw",
 ]
 
 
@@ -363,8 +363,10 @@ class ServoState:
     pc_timestamp_ns: int
     pc_receive_unix_time_ms: int
     target_angles: List[float] = field(default_factory=lambda: [0.0, 0.0, 0.0, 0.0])
-    estimated_cable_lengths: List[float] = field(default_factory=lambda: [0.0, 0.0, 0.0, 0.0])
-    estimated_joint_angles: List[float] = field(default_factory=lambda: [0.0, 0.0])
+    target_pitch: float = 0.0
+    target_yaw: float = 0.0
+    current_pitch: float = 0.0
+    current_yaw: float = 0.0
 
     def to_csv_row(self) -> dict:
         row = {
@@ -375,13 +377,10 @@ class ServoState:
             row[f"servo_{i+1}_target_deg"] = (
                 self.target_angles[i] if i < len(self.target_angles) else ""
             )
-            row[f"cable_{i+1}_length_mm"] = (
-                self.estimated_cable_lengths[i] if i < len(self.estimated_cable_lengths) else ""
-            )
-        for i in range(2):
-            row[f"joint_angle_{i+1}_deg"] = (
-                self.estimated_joint_angles[i] if i < len(self.estimated_joint_angles) else ""
-            )
+        row["target_pitch"] = self.target_pitch
+        row["target_yaw"] = self.target_yaw
+        row["current_pitch"] = self.current_pitch
+        row["current_yaw"] = self.current_yaw
         return row
 
 

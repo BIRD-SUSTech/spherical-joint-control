@@ -116,7 +116,7 @@ python -m data_collection.main run -c config.json --duration 30
 - **mocap**：`pc_timestamp_ns`、`pc_receive_unix_time_ms`、`frame_index`、`hardware_timestamp`、`rigid_body_id`、位置 `x/y/z`、四元数 `qx/qy/qz/qw`
 - **imu**：时间戳、`subscribe_tag`、三轴加速度（含/不含重力）、陀螺仪、磁力计、四元数、欧拉角 `angle_x/y/z`、温度气压等
 - **force**：时间戳 + `ch1`–`ch6` 六通道力
-- **servo**：时间戳、`servo_1..4_target_deg`（归一化 [-1,1]）、`cable_1..4_length_mm`、`joint_angle_1/2_deg`（目标/实际姿态）
+- **servo**：时间戳、`servo_1..4_target_deg`（归一化 [-1,1]）、`target_pitch/target_yaw`（目标姿态）、`current_pitch/current_yaw`（实测姿态）
 
 ## 架构
 
@@ -239,7 +239,7 @@ python -m data_collection.main run --static 5 --calib 10 --duration 10
 python -m data_collection.main run -c data_collection/scripts/test_config.json
 ```
 
-验证 `servo_data.csv` 按 ~200Hz 写入、`joint_angle_*` 中目标与实际姿态逼近。
+验证 `servo_data.csv` 按 ~200Hz 写入、`target_pitch/target_yaw` 与 `current_pitch/current_yaw` 逼近。
 **必须开启 mocap**——PID 依赖 mocap 姿态反馈；`--no-mocap` 时反馈恒为 0，指令会推满。
 
 ### 4. direct_gain 标定（需要舵机串口 + 动捕）

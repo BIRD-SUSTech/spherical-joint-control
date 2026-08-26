@@ -24,13 +24,21 @@ def coupled_angles(
     u_yaw: float,
     flip_pitch: bool = False,
     flip_yaw: bool = False,
+    pretension_deg: float = 0.0,
 ) -> list[int]:
-    """2 DOF 控制量 → 4 舵机整数角度 [s1, s2, s3, s4]，并限幅到 ±135。"""
+    """2 DOF 控制量 → 4 舵机整数角度 [s1, s2, s3, s4]，并限幅到 ±135。
+
+    pretension_deg: 预紧偏置（°），4 路指令统一减去该值。实机验证（--hold 15 15
+        稳态）表明缆绳绷紧对应负指令方向，统一减偏置可同时收紧四条缆绳，且只加
+        共模、不改变对偶差动 s1−s3 / s2−s4，因此不引起关节运动。取值参考
+        data_collection 的 direct_pretension_norm 0.047 ≈ 6.4°（2mm 预紧）。
+    """
     if flip_pitch:
         u_pitch = -u_pitch
     if flip_yaw:
         u_yaw = -u_yaw
     raw = [u_pitch, u_yaw, -u_pitch, -u_yaw]
+    raw = [a - pretension_deg for a in raw]
     return [int(round(max(-HALF_RANGE_DEG, min(HALF_RANGE_DEG, a)))) for a in raw]
 
 

@@ -93,8 +93,6 @@ class LogServoController(ServoController):
             pc_timestamp_ns=time.perf_counter_ns(),
             pc_receive_unix_time_ms=int(time.time() * 1000),
             target_angles=list(angles),
-            estimated_cable_lengths=self._cable_lengths_from_angles(angles),
-            estimated_joint_angles=self._joint_angles_from_lengths(angles),
         )
         try:
             self._output_queue.put_nowait(state)
@@ -103,14 +101,6 @@ class LogServoController(ServoController):
 
     def emergency_stop(self) -> None:
         logger.info("LogServoController: emergency stop (no-op)")
-
-    @staticmethod
-    def _cable_lengths_from_angles(angles: List[float]) -> List[float]:
-        return [0.0] * len(angles)
-
-    @staticmethod
-    def _joint_angles_from_lengths(lengths: List[float]) -> List[float]:
-        return [0.0, 0.0]
 
 
 # ==========================================================================
@@ -341,8 +331,10 @@ class PIDServoController:
             pc_timestamp_ns=now_ns,
             pc_receive_unix_time_ms=now_ms,
             target_angles=list(servo_norm),
-            estimated_cable_lengths=[target_pitch, target_yaw, current_pitch, current_yaw],
-            estimated_joint_angles=[target_pitch, target_yaw],
+            target_pitch=target_pitch,
+            target_yaw=target_yaw,
+            current_pitch=current_pitch,
+            current_yaw=current_yaw,
         )
         try:
             self._output_queue.put_nowait(state)
