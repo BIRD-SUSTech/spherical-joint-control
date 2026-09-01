@@ -12,7 +12,7 @@
     python -m data_collection.valuation --servo <session>/servo_data.csv --mocap <session>/mocap_data.csv
 """
 
-from data_collection.orchestrator import _quat_to_pitch_yaw
+from data_collection.orchestrator import _quat_to_pitch_yaw, _mocap_reference_quat
 import datetime
 import os
 import pandas as pd
@@ -90,13 +90,8 @@ def evaluation(mocap_path: str = None, servo_path: str = None) -> pd.DataFrame |
             print(f"mocap csv 缺少时间列 {time_col}")
             return None
 
-        # 参考坐标系：动捕首帧四元数
-        ref_q = np.array([
-            mocap_df["rigid_body_qw"].iloc[0],
-            mocap_df["rigid_body_qx"].iloc[0],
-            mocap_df["rigid_body_qy"].iloc[0],
-            mocap_df["rigid_body_qz"].iloc[0],
-        ])
+        # 参考坐标系：STATIC 段末帧四元数（与实时采集口径一致）
+        ref_q = _mocap_reference_quat(mocap_df)
 
         mocap_pitch_list = []
         mocap_yaw_list = []

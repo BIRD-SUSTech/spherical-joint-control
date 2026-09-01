@@ -7,7 +7,7 @@
 import numpy as np
 import pandas as pd
 import matplotlib.pyplot as plt
-from data_collection.orchestrator import _quat_to_pitch_yaw
+from data_collection.orchestrator import _quat_to_pitch_yaw, _mocap_reference_quat
 
 TOLERANCE_NS = 50_000_000  # 50 ms
 
@@ -53,11 +53,10 @@ def calibrate_linear(imu_path: str, mocap_path: str) -> tuple[np.ndarray, np.nda
     imu = pd.read_csv(imu_path)
     mocap = pd.read_csv(mocap_path)
 
-    # 各自的第一帧作为参考
+    # IMU 以自身首帧为参考（内部约定，线性拟合会吸收）；动捕用 STATIC 末帧（与实时口径一致）
     imu_ref = np.array([imu["quat_w"].iloc[0], imu["quat_x"].iloc[0],
                          imu["quat_y"].iloc[0], imu["quat_z"].iloc[0]])
-    mocap_ref = np.array([mocap["rigid_body_qw"].iloc[0], mocap["rigid_body_qx"].iloc[0],
-                           mocap["rigid_body_qy"].iloc[0], mocap["rigid_body_qz"].iloc[0]])
+    mocap_ref = _mocap_reference_quat(mocap)
 
     # 筛选标定阶段，按时间对齐
     mocap_cal = mocap[mocap["phase"] == "calibration"]
@@ -134,8 +133,7 @@ def apply_linear_calibration(imu_path: str,
 def load_mocap_as_pitch_yaw(path: str) -> pd.DataFrame:
     """加载动捕数据，转为 pitch / yaw（以自身首帧为参考）。"""
     df = pd.read_csv(path)
-    ref_q = np.array([df["rigid_body_qw"].iloc[0], df["rigid_body_qx"].iloc[0],
-                       df["rigid_body_qy"].iloc[0], df["rigid_body_qz"].iloc[0]])
+    ref_q = _mocap_reference_quat(df)
     return _quat_df_to_pitch_yaw(
         df,
         qw_col="rigid_body_qw", qx_col="rigid_body_qx",

@@ -14,6 +14,7 @@ from pathlib import Path
 from typing import Optional
 
 import numpy as np
+import pandas as pd
 from numpy.typing import NDArray
 
 from control_model.base_PID.pid_controller import BasePIDController
@@ -81,6 +82,7 @@ class Orchestrator:
         self._current_pitch_deg = 0.0
         self._current_yaw_deg = 0.0
         self._ref_quat: Optional[NDArray] = None  # 中立位参考四元数
+        self._latest_quat: Optional[NDArray] = None  # 最近一帧目标刚体四元数
 
         # CSV 写入器
         self._writers: dict[str, Optional[CsvWriter]] = {}
@@ -316,16 +318,29 @@ class Orchestrator:
         if self._servo_driver and not self._servo_driver.connect():
             logger.warning("Servo serial open failed; continuing log-only")
         else:
-            # 舵机初始化：发送零位保持中立
-            if self._servo_driver:
-                self._servo_driver.send(np.zeros(4))
-                logger.info("Servo initialized to neutral position")
+            self._initialize_servo_neutral()
         if self._pid_servo:
             self._pid_servo.connect()
         elif self._open_loop_ctrl:
             self._open_loop_ctrl.connect()
         elif self._servo:
             self._servo.connect()
+
+    def _initialize_servo_neutral(self) -> None:
+        """上电后把舵机摆到中立位。
+
+        开环模式发送共模预紧（零差分），使 STATIC 段参考四元数在"已张紧"状态下捕获，
+        与 EXPLORATION 段的预紧状态一致，避免参考姿态偏移。
+        """
+        if not self._servo_driver:
+            return
+        if self._open_loop_ctrl is not None:
+            p = self._config.servo.open_loop_pretension_norm
+            self._servo_driver.send(np.full(4, p))
+            logger.info("Servo initialized to pretension %.2f (open-loop)", p)
+        else:
+            self._servo_driver.send(np.zeros(4))
+            logger.info("Servo initialized to neutral position")
 
     def _start_collectors(self) -> None:
         """启动所有采集线程，并等待就绪。"""
@@ -350,6 +365,8 @@ class Orchestrator:
         logger.info("Keep the linkage STILL. IMU will calibrate zero point.")
         self._set_phase(CollectionPhase.STATIC)
         self._sleep_with_progress(orch.static_duration_s)
+        # STATIC 结束、姿态已稳定（开环模式下已张紧）时捕获中立参考四元数
+        self._capture_reference()
 
         # 标定段
         logger.info("=== PHASE: CALIBRATION (%.0fs) ===", orch.calibration_duration_s)
@@ -587,20 +604,24 @@ class Orchestrator:
         target_id = self._config.servo.rigid_body_id
         for rb in frame.rigid_bodies:
             if rb.id == target_id:
+                self._latest_quat = np.array([rb.qw, rb.qx, rb.qy, rb.qz])
                 pitch, yaw = _quat_to_pitch_yaw(
                     rb.qx, rb.qy, rb.qz, rb.qw,
                     self._ref_quat,
                 )
-                # 参照捕获
-                if self._ref_quat is None:
-                    self._ref_quat = np.array([rb.qw, rb.qx, rb.qy, rb.qz])
-                    logger.info("Reference quaternion captured from rigid body %d: "
-                                "[%.4f, %.4f, %.4f, %.4f]",
-                                target_id, rb.qw, rb.qx, rb.qy, rb.qz)
                 with self._pose_lock:
                     self._current_pitch_deg = pitch
                     self._current_yaw_deg = yaw
                 break
+
+    def _capture_reference(self) -> None:
+        """以最新一帧刚体四元数为中立参考（STATIC 段末、姿态已张紧稳定时调用）。"""
+        if self._latest_quat is None:
+            logger.warning("Reference capture skipped: no mocap frame yet")
+            return
+        self._ref_quat = self._latest_quat.copy()
+        logger.info("Reference quaternion captured: [%.4f, %.4f, %.4f, %.4f]",
+                    *self._ref_quat)
 
 
 # ------------------------------------------------------------------
@@ -634,6 +655,24 @@ def _quat_to_rotmat(q: NDArray) -> NDArray:
         [2 * (x * y + z * w),     1 - 2 * (x * x + z * z), 2 * (y * z - x * w)],
         [2 * (x * z - y * w),     2 * (y * z + x * w),     1 - 2 * (x * x + y * y)],
     ])
+
+
+def _mocap_reference_quat(mocap_df: pd.DataFrame) -> NDArray:
+    """从动捕 DataFrame 提取中立参考四元数。
+
+    优先取 STATIC 阶段最后一帧（与实时采集 `_capture_reference` 的捕获口径一致），
+    无 STATIC 阶段（或没有 phase 列）时退化为首帧。
+    """
+    if "phase" in mocap_df.columns:
+        static = mocap_df[mocap_df["phase"] == "static"]
+        if len(static) > 0:
+            row = static.iloc[-1]
+        else:
+            row = mocap_df.iloc[0]
+    else:
+        row = mocap_df.iloc[0]
+    return np.array([row["rigid_body_qw"], row["rigid_body_qx"],
+                     row["rigid_body_qy"], row["rigid_body_qz"]])
 
 
 def _quat_to_pitch_yaw(
