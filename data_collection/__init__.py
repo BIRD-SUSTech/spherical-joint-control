@@ -4,6 +4,7 @@ from .config import Config, MocapConfig, ImuConfig, ForceConfig, ServoConfig, Ou
 from .orchestrator import Orchestrator
 from .servo_controller import (
     LogServoController,
+    OpenLoopExcitationController,
     PIDServoController,
     SerialServoDriver,
     ServoController,

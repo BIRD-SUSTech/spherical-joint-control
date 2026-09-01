@@ -133,7 +133,7 @@ PID 控制线程 (轨迹跟踪时)  ─┘                        │
 
 ## 舵机控制模块
 
-`servo_controller.py` 提供四个类：
+`servo_controller.py` 提供五个类：
 
 | 类                       | 说明                                                     |
 | ----------------------- | ------------------------------------------------------ |
@@ -141,6 +141,7 @@ PID 控制线程 (轨迹跟踪时)  ─┘                        │
 | `LogServoController`    | 无硬件日志桩：仅将目标角度写入输出队列                                    |
 | `SerialServoDriver`     | 串口舵机驱动：向串口发送四路归一化角度，实现 `send`（兼容 `command_sink`）       |
 | `PIDServoController`    | PID 闭环轨迹跟踪：独立线程执行 waypoints，读 mocap 姿态反馈               |
+| `OpenLoopExcitationController` | 开环激励：差分/共模空间生成大摆幅平滑激励，直接驱动舵机（无 IK）   |
 
 ### 串口输出协议
 
@@ -197,6 +198,50 @@ PID 轨迹跟踪时，设置 `servo.enabled = true` 且配置 `servo.port`，编
 - **`direct_pretension_norm`**：中立位预紧偏置，保证对偶缆绳绷紧。`0.047` ≈ 2mm 预紧的归一化等效值。
 - 直接模式的**对偶约束天然满足**：同一对两舵机始终等量反向，不会出现一侧拉满另一侧完全松脱。
 - 纯反馈控制、无模型前馈 → 匀速轨迹会有固有跟踪滞后，靠 PID 积分消除稳态误差。
+
+### 开环激励采集（无 IK，直接控制舵机）
+
+当几何 IK 不可信时，用 `trajectory_type = "open_loop"` 在**差分/共模空间**直接生成大摆幅、低速、平滑的激励（Lissajous），不经过 IK、直接驱动舵机：
+
+```
+d1 = n1 - n3     # pitch 对抗对差分
+d2 = n2 - n4     # yaw   对抗对差分
+p  = 全局共模预紧
+n  = [p + d1/2, p + d2/2, p - d1/2, p - d2/2]
+```
+
+激励段定义在 `control_model/excitation.py`（`default_segments()` 给出默认三段 Lissajous），可在配置里覆盖：
+
+```json
+{
+  "servo": {
+    "enabled": true,
+    "port": "COM5",
+    "trajectory_type": "open_loop",
+    "open_loop_pretension_norm": 0.15,
+    "open_loop_fs": 100.0,
+    "open_loop_safety_limit_deg": 55.0,
+    "open_loop_segments": [
+      {"kind": "lissajous", "amp": 0.40, "f1": 0.10, "f2": 0.16, "duration_s": 30.0},
+      {"kind": "lissajous", "amp": 0.50, "f1": 0.22, "f2": 0.09, "duration_s": 30.0}
+    ]
+  }
+}
+```
+
+- `amp`：差分幅度（归一化）。默认 0.40~0.55 保证真实系统流畅滑动；**先在动捕里确认 `current_pitch/yaw` 明显跟随（建议 ≥±15°），不足则等比放大 `amp`**（`p=0.15` 时差分放大到 0.8 仍不越界）。
+- `open_loop_pretension_norm`：全局共模预紧 `p`，只负责绷紧缆绳、不产生运动（理想）。
+- `open_loop_safety_limit_deg`：关节角（动捕）超限 → 立即急停回中。
+- 段间自动回中立（零差分、只留预紧）停留 1s。
+- 开环模式下 `target_pitch/target_yaw` 无定义，落盘为 0；`current_pitch/current_yaw` 仍为动捕实测姿态。`servo_*_target_deg` 即四路归一化指令 `u`，与 `current_pitch/current_yaw` 构成训练前向模型的 I/O 对。
+
+> 无需 IK 标定：把 `orchestrator.calibration_duration_s` 设 0 即可跳过标定段，直接进入开环采集（STATIC 段仍建议保留，用于捕获中立参考四元数）。
+
+离线自测（无硬件/SDK）：
+
+```bash
+python data_collection/scripts/test_open_loop_offline.py
+```
 
 ## 测试指南
 

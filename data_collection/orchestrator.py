@@ -17,10 +17,12 @@ import numpy as np
 from numpy.typing import NDArray
 
 from control_model.base_PID.pid_controller import BasePIDController
+from control_model.excitation import default_segments
 from control_model.open_loop.open_loop_controller import OpenLoopController
 from .config import Config, OrchestratorConfig, OutputConfig
 from .servo_controller import (
     LogServoController,
+    OpenLoopExcitationController,
     PIDServoController,
     SerialServoDriver,
     ServoController,
@@ -74,6 +76,7 @@ class Orchestrator:
         self._pid_servo: Optional[PIDServoController] = None
         self._servo_driver: Optional[SerialServoDriver] = None
         self._open_loop: Optional[OpenLoopController] = None
+        self._open_loop_ctrl: Optional[OpenLoopExcitationController] = None
         self._pose_lock = threading.Lock()
         self._current_pitch_deg = 0.0
         self._current_yaw_deg = 0.0
@@ -214,7 +217,9 @@ class Orchestrator:
                 cfg.force, self._q_force, self._start_event, self._stop_event
             )
 
-        if self._should_use_pid_servo():
+        if self._should_use_open_loop():
+            self._setup_open_loop_excitation()
+        elif self._should_use_pid_servo():
             self._setup_pid_servo()
         elif cfg.output.enable_servo_csv:
             self._servo = LogServoController(cfg.servo, self._q_servo)
@@ -226,6 +231,9 @@ class Orchestrator:
         if cfg.trajectory_type == "waypoints":
             return bool(cfg.trajectory_waypoints)
         return cfg.trajectory_type in ("circle", "sine")
+
+    def _should_use_open_loop(self) -> bool:
+        return self._config.servo.trajectory_type == "open_loop"
 
     def _setup_pid_servo(self) -> None:
         cfg = self._config.servo
@@ -260,6 +268,27 @@ class Orchestrator:
         logger.info("PID servo configured: %d waypoints, type=%s (%s)",
                     len(trajectory), cfg.trajectory_type, mode)
 
+    def _setup_open_loop_excitation(self) -> None:
+        cfg = self._config.servo
+        driver: Optional[SerialServoDriver] = None
+        if cfg.enabled and cfg.port:
+            driver = SerialServoDriver(port=cfg.port, baudrate=cfg.baudrate)
+        self._servo_driver = driver
+
+        segments = cfg.open_loop_segments or default_segments()
+        self._open_loop_ctrl = OpenLoopExcitationController(
+            segments=segments,
+            pretension_norm=cfg.open_loop_pretension_norm,
+            command_sink=driver.send if driver else None,
+            output_queue=self._q_servo,
+            pose_source=self._get_current_pose,
+            fs=cfg.open_loop_fs,
+            safety_limit_deg=cfg.open_loop_safety_limit_deg,
+        )
+        mode = f"serial:{cfg.port}" if driver else "log-only"
+        logger.info("Open-loop excitation configured: %d segments, pretension=%.2f (%s)",
+                    len(segments), cfg.open_loop_pretension_norm, mode)
+
     @staticmethod
     def _make_trajectory(cfg) -> Trajectory:
         if cfg.trajectory_type == "waypoints":
@@ -293,6 +322,8 @@ class Orchestrator:
                 logger.info("Servo initialized to neutral position")
         if self._pid_servo:
             self._pid_servo.connect()
+        elif self._open_loop_ctrl:
+            self._open_loop_ctrl.connect()
         elif self._servo:
             self._servo.connect()
 
@@ -342,9 +373,13 @@ class Orchestrator:
 
         if self._pid_servo:
             self._pid_servo.start()
+        elif self._open_loop_ctrl:
+            self._open_loop_ctrl.start()
         self._sleep_with_progress(orch.exploration_duration_s or float("inf"))
         if self._pid_servo:
             self._pid_servo.stop()
+        elif self._open_loop_ctrl:
+            self._open_loop_ctrl.stop()
 
     def _set_phase(self, phase: CollectionPhase) -> None:
         with self._phase_lock:
@@ -481,6 +516,11 @@ class Orchestrator:
         if self._pid_servo:
             self._pid_servo.emergency_stop()
             self._pid_servo.disconnect()
+            if self._servo_driver:
+                self._servo_driver.disconnect()
+        elif self._open_loop_ctrl:
+            self._open_loop_ctrl.emergency_stop()
+            self._open_loop_ctrl.disconnect()
             if self._servo_driver:
                 self._servo_driver.disconnect()
         elif self._servo:

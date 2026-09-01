@@ -52,7 +52,7 @@ class ServoConfig:
     baudrate: int = 115200
     servo_count: int = 4
     # 轨迹配置
-    trajectory_type: str = "idle"      # "idle" | "waypoints" | "sine" | "circle"
+    trajectory_type: str = "idle"      # "idle" | "waypoints" | "sine" | "circle" | "open_loop"
     trajectory_file: Optional[str] = None
     trajectory_waypoints: list = field(default_factory=list)  # [(pitch, yaw, dur_s), ...]
     trajectory_amplitude_deg: float = 10.0   # circle/sine 振幅
@@ -75,6 +75,11 @@ class ServoConfig:
     use_ik_feedforward: bool = True          # False = 直接对抗对差分，不依赖 IK 模型
     direct_gain: float = 0.01                # IK 关闭时 deg → norm 增益
     direct_pretension_norm: float = 0.0      # IK 关闭时中立位预紧偏置 (归一化)
+    # 开环激励（无 IK，直接在差分/共模空间驱动舵机，用于数据采集）
+    open_loop_segments: list = field(default_factory=list)  # [{kind,amp,f1,f2,period_s,duration_s}]
+    open_loop_pretension_norm: float = 0.15   # 全局共模预紧（归一化）
+    open_loop_fs: float = 100.0               # 激励指令频率 (Hz)
+    open_loop_safety_limit_deg: float = 55.0  # 关节角安全限位（超限急停）
 
 
 @dataclass

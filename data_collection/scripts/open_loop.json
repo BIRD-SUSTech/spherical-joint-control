@@ -1,0 +1,33 @@
+{
+  "mocap": {
+    "server_ip": "10.1.1.198"
+  },
+  "imu": {
+    "device_address": "A5:B2:90:FF:4A:12"
+  },
+  "force": {
+    "serial_port": "COM6"
+  },
+  "servo": {
+    "enabled": true,
+    "port": "COM5",
+    "trajectory_type": "open_loop",
+    "rigid_body_id": 0,
+    "open_loop_pretension_norm": 0.15,
+    "open_loop_fs": 100.0,
+    "open_loop_safety_limit_deg": 55.0,
+    "open_loop_segments": [
+      { "kind": "lissajous", "amp": 0.40, "f1": 0.10, "f2": 0.16, "duration_s": 30.0 },
+      { "kind": "lissajous", "amp": 0.50, "f1": 0.22, "f2": 0.09, "duration_s": 30.0 },
+      { "kind": "lissajous", "amp": 0.55, "f1": 0.14, "f2": 0.30, "duration_s": 30.0 }
+    ]
+  },
+  "output": {
+    "root_dir": "//BIRD-NAS/shared_data/spherical_joint/data_collection"
+  },
+  "orchestrator": {
+    "static_duration_s": 5,
+    "calibration_duration_s": 0,
+    "exploration_duration_s": 95
+  }
+}

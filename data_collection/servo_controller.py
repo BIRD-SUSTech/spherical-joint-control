@@ -20,6 +20,7 @@ import serial
 from numpy.typing import NDArray
 
 from control_model.base_PID.pid_controller import BasePIDController
+from control_model.excitation import sample_segment
 
 from .config import ServoConfig
 from .utils.data_types import ServoState
@@ -340,3 +341,158 @@ class PIDServoController:
             self._output_queue.put_nowait(state)
         except queue.Full:
             pass
+
+
+# ==========================================================================
+# 开环激励控制器（无 IK，直接在差分/共模空间驱动舵机）
+# ==========================================================================
+
+class OpenLoopExcitationController:
+    """开环激励控制器：大摆幅平滑激励，直接驱动舵机，采集 I/O 数据。
+
+    激励在差分/共模空间生成 (d1, d2, p) -> 4 路归一化舵机角，不使用几何 IK。
+    适合"IK 不可信、先采集开环数据辨识系统"的场景。
+
+    用法:
+        ctrl = OpenLoopExcitationController(
+            segments=segments, pretension_norm=0.15,
+            command_sink=driver.send, output_queue=q_servo,
+            pose_source=orchestrator.get_current_pose, fs=100.0,
+        )
+        ctrl.connect(); ctrl.start(); ... ctrl.stop()
+    """
+
+    def __init__(
+        self,
+        segments: list[dict],
+        pretension_norm: float,
+        command_sink: Callable[[NDArray], None] | None,
+        output_queue: queue.Queue,
+        pose_source: PoseCallback | None = None,
+        fs: float = 100.0,
+        safety_limit_deg: float = 55.0,
+    ):
+        self._segments = segments
+        self._p = pretension_norm
+        self._command_sink = command_sink
+        self._output_queue = output_queue
+        self._pose_source = pose_source
+        self._fs = max(fs, 1.0)
+        self._safety_limit_deg = safety_limit_deg
+        self._stop_event = threading.Event()
+        self._thread: threading.Thread | None = None
+
+    # ------------------------------------------------------------------
+    # 生命周期
+    # ------------------------------------------------------------------
+
+    def connect(self) -> bool:
+        logger.info("OpenLoopExcitationController: ready (%d segments, pretension=%.2f)",
+                    len(self._segments), self._p)
+        return True
+
+    def disconnect(self) -> None:
+        self.stop()
+
+    def start(self) -> None:
+        if self._thread and self._thread.is_alive():
+            logger.warning("OpenLoopExcitationController: already running")
+            return
+        self._stop_event.clear()
+        self._thread = threading.Thread(
+            target=self._loop, name="OpenLoopExcitation", daemon=True
+        )
+        self._thread.start()
+        logger.info("OpenLoopExcitationController: thread started, %d segments",
+                    len(self._segments))
+
+    def stop(self) -> None:
+        self._stop_event.set()
+        if self._thread and self._thread.is_alive():
+            self._thread.join(timeout=2.0)
+        self._send_zero()
+
+    def emergency_stop(self) -> None:
+        logger.warning("OpenLoopExcitationController: EMERGENCY STOP")
+        self._stop_event.set()
+        self._send_zero()
+
+    # ------------------------------------------------------------------
+    # 内部
+    # ------------------------------------------------------------------
+
+    def _send_zero(self) -> None:
+        if self._command_sink:
+            try:
+                self._command_sink(np.zeros(4))
+            except Exception:
+                pass
+
+    def _send(self, cmd: NDArray) -> None:
+        if self._command_sink:
+            try:
+                self._command_sink(cmd)
+            except Exception:
+                logger.exception("Open-loop command failed")
+
+    def _current_pose(self) -> tuple[float, float]:
+        if self._pose_source:
+            try:
+                return self._pose_source()
+            except Exception:
+                pass
+        return (0.0, 0.0)
+
+    def _log(self, cmd: NDArray) -> None:
+        pitch, yaw = self._current_pose()
+        state = ServoState(
+            pc_timestamp_ns=time.perf_counter_ns(),
+            pc_receive_unix_time_ms=int(time.time() * 1000),
+            target_angles=list(cmd),
+            target_pitch=0.0,
+            target_yaw=0.0,
+            current_pitch=pitch,
+            current_yaw=yaw,
+        )
+        try:
+            self._output_queue.put_nowait(state)
+        except queue.Full:
+            pass
+
+    def _check_safety(self) -> bool:
+        if self._pose_source is None or self._safety_limit_deg <= 0:
+            return True
+        pitch, yaw = self._current_pose()
+        if abs(pitch) > self._safety_limit_deg or abs(yaw) > self._safety_limit_deg:
+            logger.error("Safety limit exceeded: pitch=%.1f yaw=%.1f -> stop",
+                         pitch, yaw)
+            return False
+        return True
+
+    def _loop(self) -> None:
+        dt = 1.0 / self._fs
+        for seg in self._segments:
+            if self._stop_event.is_set():
+                break
+            t, u = sample_segment(seg, self._p, self._fs)
+            logger.info("Open-loop segment: %s (%d samples)", seg.get("kind"), len(t))
+            for i in range(len(t)):
+                if self._stop_event.is_set():
+                    break
+                cmd = u[:, i]
+                self._send(cmd)
+                self._log(cmd)
+                if not self._check_safety():
+                    self._stop_event.set()
+                    self._send_zero()
+                    return
+                time.sleep(dt)
+            # 段间回到中立（只留共模预紧、零差分），停留 1s 让系统稳定
+            if not self._stop_event.is_set():
+                neutral = np.full(4, self._p)
+                for _ in range(int(1.0 / dt)):
+                    if self._stop_event.is_set():
+                        break
+                    self._send(neutral)
+                    self._log(neutral)
+                    time.sleep(dt)
