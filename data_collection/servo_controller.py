@@ -373,6 +373,7 @@ class OpenLoopExcitationController:
         safety_limit_deg: float = 55.0,
         calib_amp: float = 0.7,
         inter_segment_dwell_s: float = 1.0,
+        settle_s: float = 3.0,
     ):
         self._segments = segments
         self._p = pretension_norm
@@ -383,6 +384,7 @@ class OpenLoopExcitationController:
         self._safety_limit_deg = safety_limit_deg
         self._calib_amp = calib_amp
         self._inter_dwell_s = max(inter_segment_dwell_s, 0.0)
+        self._settle_s = max(settle_s, 0.0)
         self._stop_event = threading.Event()
         self._thread: threading.Thread | None = None
 
@@ -448,6 +450,19 @@ class OpenLoopExcitationController:
                 self._command_sink(np.full(4, self._p))
             except Exception:
                 pass
+
+    def _hold_neutral(self, duration_s: float) -> None:
+        """保持中立（零差分、只留预紧）duration_s 秒，并记录（segment_id=-1）。"""
+        if duration_s <= 0:
+            return
+        dt = 1.0 / self._fs
+        neutral = np.full(4, self._p)
+        for _ in range(int(duration_s / dt)):
+            if self._stop_event.is_set():
+                break
+            self._send(neutral)
+            self._log(neutral, segment_id=-1)
+            time.sleep(dt)
 
     def _send(self, cmd: NDArray) -> None:
         if self._command_sink:
@@ -516,7 +531,8 @@ class OpenLoopExcitationController:
                 self._send_neutral()
                 return
             time.sleep(dt)
-        self._send_neutral()
+        # 标定结束：回中立并静置 settle_s，让关节回到零位，避免污染探索段首段
+        self._hold_neutral(self._settle_s)
 
     def _loop(self) -> None:
         dt = 1.0 / self._fs
@@ -540,10 +556,4 @@ class OpenLoopExcitationController:
                 time.sleep(dt)
             # 段间回到中立（只留共模预紧、零差分），停留 dwell_s 让系统稳定并给数据分段
             if not self._stop_event.is_set():
-                neutral = np.full(4, self._p)
-                for _ in range(int(self._inter_dwell_s / dt)):
-                    if self._stop_event.is_set():
-                        break
-                    self._send(neutral)
-                    self._log(neutral, segment_id=-1)
-                    time.sleep(dt)
+                self._hold_neutral(self._inter_dwell_s)

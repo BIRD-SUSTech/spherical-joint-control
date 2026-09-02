@@ -296,6 +296,7 @@ class Orchestrator:
             safety_limit_deg=cfg.open_loop_safety_limit_deg,
             calib_amp=cfg.open_loop_calibration_amp,
             inter_segment_dwell_s=cfg.open_loop_inter_segment_dwell_s,
+            settle_s=cfg.open_loop_calibration_settle_s,
         )
         mode = f"serial:{cfg.port}" if driver else "log-only"
         logger.info("Open-loop excitation configured: %d segments, pretension=%.2f (%s)",
@@ -445,7 +446,8 @@ class Orchestrator:
         ctrl = self._open_loop_ctrl
         if ctrl is None:
             return
-        timeout = timeout_s if timeout_s is not None else ctrl.total_duration_s + 30.0
+        # 兜底超时：按总时长等比放大（time.sleep 逐拍漂移会累积，60 段时固定余量不够）
+        timeout = timeout_s if timeout_s is not None else ctrl.total_duration_s * 1.2 + 60.0
         deadline = time.perf_counter() + timeout
         while not self._stop_event.is_set() and time.perf_counter() < deadline:
             if not ctrl.is_running():

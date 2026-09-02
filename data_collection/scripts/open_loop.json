@@ -17,6 +17,7 @@
     "open_loop_fs": 100.0,
     "open_loop_safety_limit_deg": 65.0,
     "open_loop_calibration_amp": 0.7,
+    "open_loop_calibration_settle_s": 3.0,
     "open_loop_sweep_amps": [0.30, 0.45, 0.60],
     "open_loop_sweep_freqs": [0.05, 0.12, 0.20],
     "open_loop_segment_duration_s": 30.0,

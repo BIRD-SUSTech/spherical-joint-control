@@ -81,6 +81,7 @@ class ServoConfig:
     open_loop_fs: float = 100.0               # 激励指令频率 (Hz)
     open_loop_safety_limit_deg: float = 55.0  # 关节角安全限位（超限急停）
     open_loop_calibration_amp: float = 0.7    # 标定段差分幅度（保证两轴足够运动，供 IMU↔mocap 对齐）
+    open_loop_calibration_settle_s: float = 3.0  # 标定结束后回中立静置时长（消除过渡瞬态）
     # 开环激励扫描（半自动：amp × freq 网格，每段可配置时长）
     open_loop_sweep_amps: list = field(default_factory=lambda: [0.30, 0.45, 0.60])
     open_loop_sweep_freqs: list = field(default_factory=lambda: [0.05, 0.12, 0.20])
