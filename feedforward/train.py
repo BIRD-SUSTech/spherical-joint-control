@@ -12,16 +12,20 @@ from __future__ import annotations
 
 import argparse
 import json
+import sys
 from pathlib import Path
+
+# 允许直接 `python feedforward/train.py` 运行（也支持 `python -m feedforward.train`）
+sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
 import numpy as np
 import torch
 from torch import nn
 from torch.utils.data import DataLoader, TensorDataset
 
-from . import synthetic
-from .dataset import load_servo_df, segments_to_windows, normalize
-from .model import ForwardMLP
+from feedforward import synthetic
+from feedforward.dataset import load_servo_df, segments_to_windows, normalize
+from feedforward.model import ForwardMLP
 
 SEQ_LEN = 2
 IN_DIM = SEQ_LEN * 2 + SEQ_LEN * 4   # q 历史(2*seq) + u 历史(4*seq)

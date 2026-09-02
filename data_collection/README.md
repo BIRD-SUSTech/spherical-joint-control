@@ -111,12 +111,12 @@ python -m data_collection.main run -c config.json --duration 30
 
 ## 数据格式
 
-所有 CSV 行带 `phase` 列（`static` / `calibration` / `exploration`），`servo_data.csv` 除外。
+所有 CSV 行带 `phase` 列（`static` / `calibration` / `exploration`）。
 
 - **mocap**：`pc_timestamp_ns`、`pc_receive_unix_time_ms`、`frame_index`、`hardware_timestamp`、`rigid_body_id`、位置 `x/y/z`、四元数 `qx/qy/qz/qw`
 - **imu**：时间戳、`subscribe_tag`、三轴加速度（含/不含重力）、陀螺仪、磁力计、四元数、欧拉角 `angle_x/y/z`、温度气压等
 - **force**：时间戳 + `ch1`–`ch6` 六通道力
-- **servo**：时间戳、`servo_1..4_target_deg`（归一化 [-1,1]）、`target_pitch/target_yaw`（目标姿态）、`current_pitch/current_yaw`（实测姿态）
+- **servo**：时间戳、`servo_1..4_target_deg`（归一化 [-1,1]）、`target_pitch/target_yaw`（目标姿态）、`current_pitch/current_yaw`（实测姿态）、`segment_id`（开环激励段号，-1=段间/标定）
 
 ## 架构
 
@@ -210,7 +210,10 @@ p  = 全局共模预紧
 n  = [p + d1/2, p + d2/2, p - d1/2, p - d2/2]
 ```
 
-激励段定义在 `control_model/excitation.py`（`default_segments()` 给出默认三段 Lissajous），可在配置里覆盖：
+激励段有两种指定方式（`control_model/excitation.py`）：
+
+**① 半自动扫描（默认，覆盖增益×速度网格）**：不填 `open_loop_segments` 时，系统按
+`open_loop_sweep_amps × open_loop_sweep_freqs` 生成网格，逐段执行，每段时长可配。
 
 ```json
 {
@@ -221,21 +224,28 @@ n  = [p + d1/2, p + d2/2, p - d1/2, p - d2/2]
     "open_loop_pretension_norm": 0.15,
     "open_loop_fs": 100.0,
     "open_loop_safety_limit_deg": 55.0,
-    "open_loop_segments": [
-      {"kind": "lissajous", "amp": 0.40, "f1": 0.10, "f2": 0.16, "duration_s": 30.0},
-      {"kind": "lissajous", "amp": 0.50, "f1": 0.22, "f2": 0.09, "duration_s": 30.0}
-    ]
+    "open_loop_calibration_amp": 0.7,
+    "open_loop_sweep_amps": [0.30, 0.45, 0.60],
+    "open_loop_sweep_freqs": [0.05, 0.12, 0.20],
+    "open_loop_segment_duration_s": 30.0,
+    "open_loop_freq_ratio": 1.6,
+    "open_loop_inter_segment_dwell_s": 1.0
   }
 }
 ```
 
-- `amp`：差分幅度（归一化）。默认 0.40~0.55 保证真实系统流畅滑动；**先在动捕里确认 `current_pitch/yaw` 明显跟随（建议 ≥±15°），不足则等比放大 `amp`**（`p=0.15` 时差分放大到 0.8 仍不越界）。
+**② 手工段**：填 `open_loop_segments` 时优先使用（覆盖 `sweep` 配置）。
+
+- `open_loop_sweep_amps`：差分幅度列表（**增益维度**，决定位形覆盖范围）。
+- `open_loop_sweep_freqs`：基准频率列表（**速度维度**，`f×amp` 决定峰值速度）。
+- `open_loop_segment_duration_s`：每段时长（默认 30s，可调）。
+- `open_loop_freq_ratio`：Lissajous 两轴频率比 `f2/f1`（默认 1.6，不可通约 → 2D 织网更密）。
 - `open_loop_pretension_norm`：全局共模预紧 `p`，只负责绷紧缆绳、不产生运动（理想）。
 - `open_loop_safety_limit_deg`：关节角（动捕）超限 → 立即急停回中。
-- 段间自动回中立（零差分、只留预紧）停留 1s。
+- `open_loop_inter_segment_dwell_s`：段间回中立（零差分、只留预紧）停留时长，给数据分段 + 让系统稳定。
 - 开环模式下 `target_pitch/target_yaw` 无定义，落盘为 0；`current_pitch/current_yaw` 仍为动捕实测姿态。`servo_*_target_deg` 即四路归一化指令 `u`，与 `current_pitch/current_yaw` 构成训练前向模型的 I/O 对。
 
-> 无需 IK 标定：把 `orchestrator.calibration_duration_s` 设 0 即可跳过标定段，直接进入开环采集（STATIC 段仍建议保留，用于捕获中立参考四元数）。
+> **CALIBRATION 段用于 IMU↔动捕四元数对齐**：此阶段会执行一段慢速大摆幅 Lissajous，驱动两轴各 ≥±15°；`IMU_alignment.calibrate_linear` 依赖这段数据拟合 IMU→动捕映射，因此 **不要** 把 `calibration_duration_s` 设为 0。
 
 离线自测（无硬件/SDK）：
 

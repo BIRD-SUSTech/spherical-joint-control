@@ -18,7 +18,7 @@ import pandas as pd
 from numpy.typing import NDArray
 
 from control_model.base_PID.pid_controller import BasePIDController
-from control_model.excitation import default_segments
+from control_model.excitation import sweep_segments
 from control_model.open_loop.open_loop_controller import OpenLoopController
 from .config import Config, OrchestratorConfig, OutputConfig
 from .servo_controller import (
@@ -277,7 +277,15 @@ class Orchestrator:
             driver = SerialServoDriver(port=cfg.port, baudrate=cfg.baudrate)
         self._servo_driver = driver
 
-        segments = cfg.open_loop_segments or default_segments()
+        if cfg.open_loop_segments:
+            segments = cfg.open_loop_segments  # 手工段优先
+        else:
+            segments = sweep_segments(
+                cfg.open_loop_sweep_amps,
+                cfg.open_loop_sweep_freqs,
+                duration_s=cfg.open_loop_segment_duration_s,
+                ratio=cfg.open_loop_freq_ratio,
+            )
         self._open_loop_ctrl = OpenLoopExcitationController(
             segments=segments,
             pretension_norm=cfg.open_loop_pretension_norm,
@@ -286,6 +294,8 @@ class Orchestrator:
             pose_source=self._get_current_pose,
             fs=cfg.open_loop_fs,
             safety_limit_deg=cfg.open_loop_safety_limit_deg,
+            calib_amp=cfg.open_loop_calibration_amp,
+            inter_segment_dwell_s=cfg.open_loop_inter_segment_dwell_s,
         )
         mode = f"serial:{cfg.port}" if driver else "log-only"
         logger.info("Open-loop excitation configured: %d segments, pretension=%.2f (%s)",
@@ -374,6 +384,9 @@ class Orchestrator:
         if self._servo_driver and self._open_loop:
             logger.info("Running open-loop calibration sweep...")
             self._run_calibration_sweep(orch.calibration_duration_s)
+        elif self._open_loop_ctrl is not None:
+            logger.info("Running open-loop calibration excitation (no IK)...")
+            self._open_loop_ctrl.run_calibration(orch.calibration_duration_s)
         else:
             logger.info(
                 "Move the linkage in BOTH pitch and roll directions, "
@@ -382,21 +395,26 @@ class Orchestrator:
             self._sleep_with_progress(orch.calibration_duration_s)
 
         # 探索段
-        if orch.exploration_duration_s is not None:
-            logger.info("=== PHASE: EXPLORATION (%.0fs) ===", orch.exploration_duration_s)
-        else:
-            logger.info("=== PHASE: EXPLORATION (Ctrl+C to stop) ===")
         self._set_phase(CollectionPhase.EXPLORATION)
 
-        if self._pid_servo:
-            self._pid_servo.start()
-        elif self._open_loop_ctrl:
+        if self._open_loop_ctrl is not None:
+            # 开环模式：自动跑完整个 schedule；exploration_duration_s 仅作超时兜底
+            #（None = 按 schedule 总时长 + 余量）
+            logger.info("=== PHASE: EXPLORATION (open-loop schedule ~%.0fs) ===",
+                        self._open_loop_ctrl.total_duration_s)
             self._open_loop_ctrl.start()
-        self._sleep_with_progress(orch.exploration_duration_s or float("inf"))
-        if self._pid_servo:
-            self._pid_servo.stop()
-        elif self._open_loop_ctrl:
+            self._wait_open_loop_done(orch.exploration_duration_s)
             self._open_loop_ctrl.stop()
+        else:
+            if orch.exploration_duration_s is not None:
+                logger.info("=== PHASE: EXPLORATION (%.0fs) ===", orch.exploration_duration_s)
+            else:
+                logger.info("=== PHASE: EXPLORATION (Ctrl+C to stop) ===")
+            if self._pid_servo:
+                self._pid_servo.start()
+            self._sleep_with_progress(orch.exploration_duration_s or float("inf"))
+            if self._pid_servo:
+                self._pid_servo.stop()
 
     def _set_phase(self, phase: CollectionPhase) -> None:
         with self._phase_lock:
@@ -417,6 +435,24 @@ class Orchestrator:
             sleep_time = min(interval, remaining)
             time.sleep(sleep_time)
             elapsed = time.perf_counter() - start
+
+    def _wait_open_loop_done(self, timeout_s: float | None) -> None:
+        """等待开环控制器跑完整个 schedule。
+
+        timeout_s: 显式配置的 exploration_duration_s；None 时按 schedule 总时长 + 30s 余量兜底。
+        控制器线程一旦结束（schedule 跑完）即返回，避免固定 sleep 的漂移问题。
+        """
+        ctrl = self._open_loop_ctrl
+        if ctrl is None:
+            return
+        timeout = timeout_s if timeout_s is not None else ctrl.total_duration_s + 30.0
+        deadline = time.perf_counter() + timeout
+        while not self._stop_event.is_set() and time.perf_counter() < deadline:
+            if not ctrl.is_running():
+                return
+            time.sleep(0.1)
+        if ctrl.is_running():
+            logger.warning("Open-loop schedule timeout (%.0fs), stopping", timeout)
 
     def _run_calibration_sweep(self, duration_s: float) -> None:
         """在标定阶段运行开环正弦扫频轨迹."""

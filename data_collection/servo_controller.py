@@ -371,6 +371,8 @@ class OpenLoopExcitationController:
         pose_source: PoseCallback | None = None,
         fs: float = 100.0,
         safety_limit_deg: float = 55.0,
+        calib_amp: float = 0.7,
+        inter_segment_dwell_s: float = 1.0,
     ):
         self._segments = segments
         self._p = pretension_norm
@@ -379,6 +381,8 @@ class OpenLoopExcitationController:
         self._pose_source = pose_source
         self._fs = max(fs, 1.0)
         self._safety_limit_deg = safety_limit_deg
+        self._calib_amp = calib_amp
+        self._inter_dwell_s = max(inter_segment_dwell_s, 0.0)
         self._stop_event = threading.Event()
         self._thread: threading.Thread | None = None
 
@@ -417,6 +421,15 @@ class OpenLoopExcitationController:
         self._stop_event.set()
         self._send_zero()
 
+    @property
+    def total_duration_s(self) -> float:
+        """完整 schedule 总时长（各段 + 段间中立停留）。"""
+        seg_total = sum(float(seg.get("duration_s", 0.0)) for seg in self._segments)
+        return seg_total + len(self._segments) * self._inter_dwell_s
+
+    def is_running(self) -> bool:
+        return self._thread is not None and self._thread.is_alive()
+
     # ------------------------------------------------------------------
     # 内部
     # ------------------------------------------------------------------
@@ -425,6 +438,14 @@ class OpenLoopExcitationController:
         if self._command_sink:
             try:
                 self._command_sink(np.zeros(4))
+            except Exception:
+                pass
+
+    def _send_neutral(self) -> None:
+        """发送中立（零差分、只留共模预紧）。"""
+        if self._command_sink:
+            try:
+                self._command_sink(np.full(4, self._p))
             except Exception:
                 pass
 
@@ -443,7 +464,7 @@ class OpenLoopExcitationController:
                 pass
         return (0.0, 0.0)
 
-    def _log(self, cmd: NDArray) -> None:
+    def _log(self, cmd: NDArray, segment_id: int = -1) -> None:
         pitch, yaw = self._current_pose()
         state = ServoState(
             pc_timestamp_ns=time.perf_counter_ns(),
@@ -453,6 +474,7 @@ class OpenLoopExcitationController:
             target_yaw=0.0,
             current_pitch=pitch,
             current_yaw=yaw,
+            segment_id=segment_id,
         )
         try:
             self._output_queue.put_nowait(state)
@@ -469,30 +491,59 @@ class OpenLoopExcitationController:
             return False
         return True
 
+    def run_calibration(self, duration_s: float) -> None:
+        """CALIBRATION 段：慢速大摆幅 Lissajous，驱动关节覆盖工作空间。
+
+        供 IMU↔动捕四元数线性对齐使用（需要两轴都有足够运动）。
+        阻塞执行 duration_s，结束后回到中立预紧。
+        """
+        if duration_s <= 0:
+            return
+        seg = {"kind": "lissajous", "amp": self._calib_amp,
+               "f1": 0.05, "f2": 0.08, "duration_s": duration_s}
+        t, u = sample_segment(seg, self._p, self._fs)
+        dt = 1.0 / self._fs
+        logger.info("Open-loop calibration: amp=%.2f, %.1fs (%d samples)",
+                    self._calib_amp, duration_s, len(t))
+        for i in range(len(t)):
+            if self._stop_event.is_set():
+                break
+            cmd = u[:, i]
+            self._send(cmd)
+            self._log(cmd)
+            if not self._check_safety():
+                self._stop_event.set()
+                self._send_neutral()
+                return
+            time.sleep(dt)
+        self._send_neutral()
+
     def _loop(self) -> None:
         dt = 1.0 / self._fs
-        for seg in self._segments:
+        for seg_idx, seg in enumerate(self._segments):
             if self._stop_event.is_set():
                 break
             t, u = sample_segment(seg, self._p, self._fs)
-            logger.info("Open-loop segment: %s (%d samples)", seg.get("kind"), len(t))
+            logger.info("Open-loop segment %d/%d: %s (amp=%.2f, %d samples)",
+                        seg_idx + 1, len(self._segments), seg.get("kind"),
+                        seg.get("amp", float("nan")), len(t))
             for i in range(len(t)):
                 if self._stop_event.is_set():
                     break
                 cmd = u[:, i]
                 self._send(cmd)
-                self._log(cmd)
+                self._log(cmd, segment_id=seg_idx)
                 if not self._check_safety():
                     self._stop_event.set()
                     self._send_zero()
                     return
                 time.sleep(dt)
-            # 段间回到中立（只留共模预紧、零差分），停留 1s 让系统稳定
+            # 段间回到中立（只留共模预紧、零差分），停留 dwell_s 让系统稳定并给数据分段
             if not self._stop_event.is_set():
                 neutral = np.full(4, self._p)
-                for _ in range(int(1.0 / dt)):
+                for _ in range(int(self._inter_dwell_s / dt)):
                     if self._stop_event.is_set():
                         break
                     self._send(neutral)
-                    self._log(neutral)
+                    self._log(neutral, segment_id=-1)
                     time.sleep(dt)

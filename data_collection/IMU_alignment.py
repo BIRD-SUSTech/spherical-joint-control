@@ -58,13 +58,18 @@ def calibrate_linear(imu_path: str, mocap_path: str) -> tuple[np.ndarray, np.nda
                          imu["quat_y"].iloc[0], imu["quat_z"].iloc[0]])
     mocap_ref = _mocap_reference_quat(mocap)
 
-    # 筛选标定阶段，按时间对齐
+    # 筛选标定阶段
     mocap_cal = mocap[mocap["phase"] == "calibration"]
     if len(mocap_cal) == 0:
         raise ValueError("动捕数据中没有 calibration 阶段")
+    # 新数据 IMU 带 phase 列，直接按 phase 筛；旧数据无 phase 列则退回全量（靠时间戳容差兜底）
+    if "phase" in imu.columns:
+        imu_cal = imu[imu["phase"] == "calibration"]
+    else:
+        imu_cal = imu
 
     merged = pd.merge_asof(
-        imu[["pc_timestamp_ns", "quat_w", "quat_x", "quat_y", "quat_z"]],
+        imu_cal[["pc_timestamp_ns", "quat_w", "quat_x", "quat_y", "quat_z"]],
         mocap_cal[["pc_timestamp_ns", "rigid_body_qw", "rigid_body_qx",
                     "rigid_body_qy", "rigid_body_qz"]],
         on="pc_timestamp_ns", direction="nearest", tolerance=TOLERANCE_NS,

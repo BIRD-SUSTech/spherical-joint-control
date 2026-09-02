@@ -15,19 +15,19 @@
     "rigid_body_id": 0,
     "open_loop_pretension_norm": 0.15,
     "open_loop_fs": 100.0,
-    "open_loop_safety_limit_deg": 55.0,
-    "open_loop_segments": [
-      { "kind": "lissajous", "amp": 0.40, "f1": 0.10, "f2": 0.16, "duration_s": 30.0 },
-      { "kind": "lissajous", "amp": 0.50, "f1": 0.22, "f2": 0.09, "duration_s": 30.0 },
-      { "kind": "lissajous", "amp": 0.55, "f1": 0.14, "f2": 0.30, "duration_s": 30.0 }
-    ]
+    "open_loop_safety_limit_deg": 65.0,
+    "open_loop_calibration_amp": 0.7,
+    "open_loop_sweep_amps": [0.30, 0.45, 0.60],
+    "open_loop_sweep_freqs": [0.05, 0.12, 0.20],
+    "open_loop_segment_duration_s": 30.0,
+    "open_loop_freq_ratio": 1.6,
+    "open_loop_inter_segment_dwell_s": 1.0
   },
   "output": {
     "root_dir": "//BIRD-NAS/shared_data/spherical_joint/data_collection"
   },
   "orchestrator": {
     "static_duration_s": 5,
-    "calibration_duration_s": 0,
-    "exploration_duration_s": 95
+    "calibration_duration_s": 15
   }
 }

@@ -71,3 +71,28 @@ def sample_segment(seg, p, fs):
     if kind == "circle":
         return circle(seg["amp"], seg["period_s"], p, fs, seg["duration_s"])
     raise ValueError(f"unknown excitation kind: {kind}")
+
+
+def sweep_segments(amps, freqs, duration_s=30.0, ratio=1.6):
+    """生成 amp × freq 网格的激励段（覆盖增益与速度区间）。
+
+    Args:
+        amps: 差分幅值列表（增益维度，决定位形覆盖范围）。
+        freqs: 基准频率列表（速度维度，f×amp 决定峰值速度）。
+        duration_s: 每段时长。
+        ratio: Lissajous 两轴频率比 f2/f1（>1 且尽量不可通约，保证 2D 织网更密）。
+
+    Returns:
+        按 amp 外层、freq 内层排列的段列表，每段 {"kind","amp","f1","f2","duration_s"}。
+    """
+    segments = []
+    for amp in amps:
+        for f in freqs:
+            segments.append({
+                "kind": "lissajous",
+                "amp": amp,
+                "f1": f,
+                "f2": round(f * ratio, 4),
+                "duration_s": duration_s,
+            })
+    return segments

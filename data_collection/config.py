@@ -80,6 +80,13 @@ class ServoConfig:
     open_loop_pretension_norm: float = 0.15   # 全局共模预紧（归一化）
     open_loop_fs: float = 100.0               # 激励指令频率 (Hz)
     open_loop_safety_limit_deg: float = 55.0  # 关节角安全限位（超限急停）
+    open_loop_calibration_amp: float = 0.7    # 标定段差分幅度（保证两轴足够运动，供 IMU↔mocap 对齐）
+    # 开环激励扫描（半自动：amp × freq 网格，每段可配置时长）
+    open_loop_sweep_amps: list = field(default_factory=lambda: [0.30, 0.45, 0.60])
+    open_loop_sweep_freqs: list = field(default_factory=lambda: [0.05, 0.12, 0.20])
+    open_loop_segment_duration_s: float = 30.0   # 每段时长
+    open_loop_freq_ratio: float = 1.6            # Lissajous 两轴频率比 f2/f1
+    open_loop_inter_segment_dwell_s: float = 1.0  # 段间中立停留时长（给数据分段/稳定）
 
 
 @dataclass

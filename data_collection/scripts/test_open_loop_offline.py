@@ -31,7 +31,7 @@ def main() -> int:
     cfg.output.root_dir = ROOT / "data_collection" / "sessions_test"
     cfg.orchestrator.static_duration_s = 0.0
     cfg.orchestrator.calibration_duration_s = 0.0
-    cfg.orchestrator.exploration_duration_s = 1.5
+    # exploration_duration_s 留 None：开环模式自动按 schedule 总时长跑完
     cfg.servo.trajectory_type = "open_loop"
     cfg.servo.enabled = False  # log-only，不打开串口
     cfg.servo.open_loop_pretension_norm = 0.15

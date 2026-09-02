@@ -93,6 +93,7 @@ IMU_CSV_COLUMNS = [
     "ax_no_g_mps2", "ay_no_g_mps2", "az_no_g_mps2",
     "gyro_x_dps", "gyro_y_dps", "gyro_z_dps",
     "quat_w", "quat_x", "quat_y", "quat_z",
+    "phase",
 ]
 
 # IM948 数据包解析常量
@@ -315,6 +316,7 @@ FORCE_CSV_COLUMNS = [
     "pc_timestamp_ns",
     "pc_receive_unix_time_ms",
     "ch1", "ch2", "ch3", "ch4",
+    "phase",
 ]
 
 
@@ -355,6 +357,8 @@ SERVO_CSV_COLUMNS = [
     "servo_1_target_deg", "servo_2_target_deg", "servo_3_target_deg", "servo_4_target_deg",
     "target_pitch", "target_yaw",
     "current_pitch", "current_yaw",
+    "segment_id",
+    "phase",
 ]
 
 
@@ -367,6 +371,7 @@ class ServoState:
     target_yaw: float = 0.0
     current_pitch: float = 0.0
     current_yaw: float = 0.0
+    segment_id: int = -1
 
     def to_csv_row(self) -> dict:
         row = {
@@ -381,6 +386,7 @@ class ServoState:
         row["target_yaw"] = self.target_yaw
         row["current_pitch"] = self.current_pitch
         row["current_yaw"] = self.current_yaw
+        row["segment_id"] = self.segment_id
         return row
 
 
