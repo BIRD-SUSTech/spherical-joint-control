@@ -30,6 +30,7 @@ feedforward/outputs/
 
 # === 日志 ===
 *.log
+control/logs/
 
 # === IDE / 编辑器 ===
 .vscode/
