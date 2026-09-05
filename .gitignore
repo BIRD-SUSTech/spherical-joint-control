@@ -28,9 +28,10 @@ feedforward/outputs/
 .env
 .env.*
 
-# === 日志 ===
+# === 日志 / 运行时会话产物 ===
 *.log
 control/logs/
+collect/logs/
 
 # === IDE / 编辑器 ===
 .vscode/
