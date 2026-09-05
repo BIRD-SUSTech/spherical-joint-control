@@ -41,3 +41,9 @@ feedforward/outputs/
 # === 操作系统 ===
 .DS_Store
 Thumbs.db
+
+# === 归档目录内的数据/产物（继续不上传）===
+archive/data_collection/sessions/
+archive/data_collection/sessions_test/
+archive/data_collection/outputs/
+archive/feedforward/outputs/
