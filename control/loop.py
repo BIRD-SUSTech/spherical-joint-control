@@ -174,7 +174,12 @@ def main() -> int:
     finally:
         if f is not None:
             f.close()
-        bus.relax()
+        # 正常收尾回中位：offset=0，两对舵机回到固件 reset 中立位(Sx_MID)，保持缆张紧。
+        # 不用 bus.relax()(id=0)：固件会四路完全放线，导致过度放线/杆垂落（实机反馈）。
+        # id=0 松缆仅留给急停/guardian(关节角超限)场景。
+        logger.info("收尾：回中位 (offset=0, offset=0)")
+        bus.send_pair(0, 0)
+        time.sleep(1.5)  # 等待舵机回到中位
         bus.close()
         mocap.stop()
         if csv_path is not None:
