@@ -54,7 +54,7 @@ def parse_args() -> argparse.Namespace:
                    help="圆形轨迹（振幅°, 周期 s）")
     p.add_argument("--duration", type=float, default=30.0, help="运行时长 s（默认 30）")
     p.add_argument("--ip", default="10.1.1.198", help="动捕服务器 IP")
-    p.add_argument("--port", default=None, help="舵机串口（真实模式必填）")
+    p.add_argument("--servo-port", default=None, help="舵机串口（真实模式必填）")
     p.add_argument("--rb", type=int, default=0, help="动捕刚体索引")
     p.add_argument("--no-csv", action="store_true", help="不写闭环 CSV")
     return p.parse_args()
@@ -108,11 +108,11 @@ def main() -> int:
     # 舵机总线
     if args.mock or args.dry_run:
         bus = MockServoBus()
-    elif args.port is None:
-        logger.error("真实模式必须指定 --port（舵机串口）")
+    elif args.servo_port is None:
+        logger.error("真实模式必须指定 --servo-port（舵机串口）")
         return 1
     else:
-        bus = ServoBus(args.port)
+        bus = ServoBus(args.servo_port)
     if not bus.connect():
         return 1
 
@@ -136,7 +136,7 @@ def main() -> int:
                          "current_front_back", "current_left_right",
                          "out_front_back", "out_left_right"])
 
-    mode = "mock" if args.mock else ("dry-run" if args.dry_run else f"串口 {args.port}")
+    mode = "mock" if args.mock else ("dry-run" if args.dry_run else f"串口 {args.servo_port}")
     logger.info("控制回路启动（%dHz），模式=%s", LOOP_HZ, mode)
 
     t0 = time.perf_counter()

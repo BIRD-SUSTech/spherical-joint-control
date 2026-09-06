@@ -69,7 +69,7 @@ def parse_args() -> argparse.Namespace:
                    help="圆形轨迹（振幅°, 周期 s）")
     p.add_argument("--duration", type=float, default=30.0, help="运行时长 s（默认 30）")
     p.add_argument("--ip", default="10.1.1.198", help="动捕服务器 IP")
-    p.add_argument("--port", default=None, help="舵机串口（真实模式必填）")
+    p.add_argument("--servo-port", default=None, help="舵机串口（真实模式必填）")
     p.add_argument("--rb", type=int, default=0, help="动捕刚体索引")
     p.add_argument("--no-imu", action="store_true", help="不采集 IMU")
     p.add_argument("--no-force", action="store_true", help="不采集力传感器")
@@ -152,11 +152,11 @@ class Orchestrator:
             # 3. 舵机总线
             if args.mock or args.dry_run:
                 self._bus = MockServoBus()
-            elif args.port is None:
-                logger.error("真实模式必须指定 --port（舵机串口）")
+            elif args.servo_port is None:
+                logger.error("真实模式必须指定 --servo-port（舵机串口）")
                 return 1
             else:
-                self._bus = ServoBus(args.port)
+                self._bus = ServoBus(args.servo_port)
             if not self._bus.connect():
                 return 1
 
@@ -184,7 +184,7 @@ class Orchestrator:
             consumers = self._start_consumers()
 
             # 6. 闭环控制循环
-            mode = "mock" if args.mock else ("dry-run" if args.dry_run else f"串口 {args.port}")
+            mode = "mock" if args.mock else ("dry-run" if args.dry_run else f"串口 {args.servo_port}")
             logger.info("闭环采集启动（%dHz），模式=%s，时长 %.0fs",
                         LOOP_HZ, mode, args.duration)
             self._run_control_loop(args.duration)
