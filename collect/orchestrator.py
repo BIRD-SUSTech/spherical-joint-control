@@ -69,11 +69,11 @@ def parse_args() -> argparse.Namespace:
                    help="圆形轨迹（振幅°, 周期 s）")
     p.add_argument("--duration", type=float, default=30.0, help="运行时长 s（默认 30）")
     p.add_argument("--ip", default="10.1.1.198", help="动捕服务器 IP")
-    p.add_argument("--port", default="COM5", help="舵机串口")
+    p.add_argument("--port", default=None, help="舵机串口（真实模式必填）")
     p.add_argument("--rb", type=int, default=0, help="动捕刚体索引")
     p.add_argument("--no-imu", action="store_true", help="不采集 IMU")
     p.add_argument("--no-force", action="store_true", help="不采集力传感器")
-    p.add_argument("--force-port", default="COM6", help="力传感器串口（默认 COM6）")
+    p.add_argument("--force-port", default=None, help="力传感器串口（启用采集时必填）")
     p.add_argument("--out", default="collect/logs", help="会话根目录")
     p.add_argument("--segment-id", type=int, default=0, help="闭环数据段 id（默认 0）")
     return p.parse_args()
@@ -150,7 +150,13 @@ class Orchestrator:
                     return 1
 
             # 3. 舵机总线
-            self._bus = MockServoBus() if (args.mock or args.dry_run) else ServoBus(args.port)
+            if args.mock or args.dry_run:
+                self._bus = MockServoBus()
+            elif args.port is None:
+                logger.error("真实模式必须指定 --port（舵机串口）")
+                return 1
+            else:
+                self._bus = ServoBus(args.port)
             if not self._bus.connect():
                 return 1
 
@@ -163,13 +169,16 @@ class Orchestrator:
                     logger.exception("IMU 启动失败，跳过 IMU 采集")
                     self._imu = None
             if not args.mock and not args.no_force:
-                try:
-                    self._force = ForceCollector(self._q_force, self._stop_event,
-                                                 serial_port=args.force_port)
-                    self._force.start()
-                except Exception:
-                    logger.exception("力传感器启动失败，跳过力采集")
-                    self._force = None
+                if args.force_port is None:
+                    logger.warning("已启用力采集但未指定 --force-port，跳过力采集")
+                else:
+                    try:
+                        self._force = ForceCollector(self._q_force, self._stop_event,
+                                                     serial_port=args.force_port)
+                        self._force.start()
+                    except Exception:
+                        logger.exception("力传感器启动失败，跳过力采集")
+                        self._force = None
 
             # 5. consumer 线程
             consumers = self._start_consumers()

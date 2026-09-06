@@ -19,7 +19,7 @@ class ForceCollector:
         self,
         output_queue: queue.Queue,
         stop_event: threading.Event,
-        serial_port: str = "COM6",
+        serial_port: str,
         baudrate: int = 19200,
         data_bits: int = 8,
         stop_bits: int = 1,

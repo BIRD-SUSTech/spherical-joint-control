@@ -54,7 +54,7 @@ def parse_args() -> argparse.Namespace:
                    help="圆形轨迹（振幅°, 周期 s）")
     p.add_argument("--duration", type=float, default=30.0, help="运行时长 s（默认 30）")
     p.add_argument("--ip", default="10.1.1.198", help="动捕服务器 IP")
-    p.add_argument("--port", default="COM5", help="舵机串口")
+    p.add_argument("--port", default=None, help="舵机串口（真实模式必填）")
     p.add_argument("--rb", type=int, default=0, help="动捕刚体索引")
     p.add_argument("--no-csv", action="store_true", help="不写闭环 CSV")
     return p.parse_args()
@@ -106,7 +106,13 @@ def main() -> int:
             return 1
 
     # 舵机总线
-    bus = MockServoBus() if (args.mock or args.dry_run) else ServoBus(args.port)
+    if args.mock or args.dry_run:
+        bus = MockServoBus()
+    elif args.port is None:
+        logger.error("真实模式必须指定 --port（舵机串口）")
+        return 1
+    else:
+        bus = ServoBus(args.port)
     if not bus.connect():
         return 1
 
