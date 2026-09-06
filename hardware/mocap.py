@@ -61,9 +61,9 @@ class MocapReader:
         self._pose: Optional[Pose] = None
 
     def connect(self) -> bool:
-        from nokov import nokovsdk  # 惰性导入，mock 无需 SDK
-
         try:
+            from nokov import nokovsdk  # 惰性导入，mock 无需 SDK
+
             self._sdk = nokovsdk
             self._client = nokovsdk.PySDKClient()
             ret = self._client.Initialize(bytes(self.server_ip, encoding="utf8"))

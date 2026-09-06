@@ -73,6 +73,7 @@ def parse_args() -> argparse.Namespace:
     p.add_argument("--rb", type=int, default=0, help="动捕刚体索引")
     p.add_argument("--no-imu", action="store_true", help="不采集 IMU")
     p.add_argument("--no-force", action="store_true", help="不采集力传感器")
+    p.add_argument("--force-port", default="COM6", help="力传感器串口（默认 COM6）")
     p.add_argument("--out", default="collect/logs", help="会话根目录")
     p.add_argument("--segment-id", type=int, default=0, help="闭环数据段 id（默认 0）")
     return p.parse_args()
@@ -122,68 +123,105 @@ class Orchestrator:
 
     def run(self) -> int:
         args = self._args
+        consumers: list[threading.Thread] = []
+        rc = 1
+        try:
+            # 1. 会话目录 + CSV 写入器
+            self._session = SessionManager(root_dir=Path(args.out)).create_session()
+            logger.info("会话目录: %s", self._session.dir)
+            self._open_writers()
 
-        # 1. 会话目录 + CSV 写入器
-        self._session = SessionManager(root_dir=Path(args.out)).create_session()
-        logger.info("会话目录: %s", self._session.dir)
-        self._open_writers()
+            # 2. 动捕（on_frame 回调 → mocap 落盘）
+            mocap_cb = self._on_mocap_frame if not args.mock else None
+            self._mocap = MockMocap(on_frame=self._on_mocap_frame) if args.mock \
+                else MocapReader(args.ip, args.rb, on_frame=mocap_cb)
+            if not self._mocap.connect():
+                logger.error("动捕连接失败，退出")
+                return 1
+            self._mocap.start()
 
-        # 2. 动捕（on_frame 回调 → mocap 落盘）
-        mocap_cb = self._on_mocap_frame if not args.mock else None
-        self._mocap = MockMocap(on_frame=self._on_mocap_frame) if args.mock \
-            else MocapReader(args.ip, args.rb, on_frame=mocap_cb)
-        if not self._mocap.connect():
-            logger.error("动捕连接失败，退出")
-            return 1
-        self._mocap.start()
+            # 真实动捕等待首帧
+            if not args.mock:
+                deadline = time.time() + 3.0
+                while time.time() < deadline and self._mocap.get_pose() is None:
+                    time.sleep(0.01)
+                if self._mocap.get_pose() is None:
+                    logger.error("3s 内未收到动捕帧，退出")
+                    return 1
 
-        # 真实动捕等待首帧
-        if not args.mock:
-            deadline = time.time() + 3.0
-            while time.time() < deadline and self._mocap.get_pose() is None:
-                time.sleep(0.01)
-            if self._mocap.get_pose() is None:
-                logger.error("3s 内未收到动捕帧，退出")
+            # 3. 舵机总线
+            self._bus = MockServoBus() if (args.mock or args.dry_run) else ServoBus(args.port)
+            if not self._bus.connect():
                 return 1
 
-        # 3. 舵机总线
-        self._bus = MockServoBus() if (args.mock or args.dry_run) else ServoBus(args.port)
-        if not self._bus.connect():
-            return 1
+            # 4. IMU / 力采集器（启动失败降级，不中断主流程）
+            if not args.mock and not args.no_imu:
+                try:
+                    self._imu = ImuCollector(self._q_imu, self._stop_event)
+                    self._imu.start()
+                except Exception:
+                    logger.exception("IMU 启动失败，跳过 IMU 采集")
+                    self._imu = None
+            if not args.mock and not args.no_force:
+                try:
+                    self._force = ForceCollector(self._q_force, self._stop_event,
+                                                 serial_port=args.force_port)
+                    self._force.start()
+                except Exception:
+                    logger.exception("力传感器启动失败，跳过力采集")
+                    self._force = None
 
-        # 4. IMU / 力采集器（仅真实模式，且未显式关闭）
-        if not args.mock and not args.no_imu:
-            self._imu = ImuCollector(self._q_imu, self._stop_event)
-            self._imu.start()
-        if not args.mock and not args.no_force:
-            self._force = ForceCollector(self._q_force, self._stop_event)
-            self._force.start()
+            # 5. consumer 线程
+            consumers = self._start_consumers()
 
-        # 5. consumer 线程
-        consumers = self._start_consumers()
+            # 6. 闭环控制循环
+            mode = "mock" if args.mock else ("dry-run" if args.dry_run else f"串口 {args.port}")
+            logger.info("闭环采集启动（%dHz），模式=%s，时长 %.0fs",
+                        LOOP_HZ, mode, args.duration)
+            self._run_control_loop(args.duration)
 
-        # 6. 闭环控制循环
-        mode = "mock" if args.mock else ("dry-run" if args.dry_run else f"串口 {args.port}")
-        logger.info("闭环采集启动（%dHz），模式=%s，时长 %.0fs",
-                    LOOP_HZ, mode, args.duration)
-        self._run_control_loop(args.duration)
+            # 7. 收尾：回中位
+            logger.info("收尾：回中位 (offset=0, offset=0)")
+            self._bus.send_pair(0, 0)
+            time.sleep(1.5)
+            rc = 0
+        except Exception:
+            logger.exception("采集异常终止")
+            rc = 1
+        finally:
+            self._finalize(consumers)
+        return rc
 
-        # 7. 收尾：回中位
-        logger.info("收尾：回中位 (offset=0, offset=0)")
-        self._bus.send_pair(0, 0)
-        time.sleep(1.5)
+    def _finalize(self, consumers: list[threading.Thread]) -> None:
+        """统一收尾（正常/异常路径都走）：回中位兜底 → 停采集 → 排空 → 关 CSV → 尽力写 metadata。"""
+        if self._bus is not None:
+            try:
+                self._bus.send_pair(0, 0)
+            except Exception:  # noqa: BLE001
+                pass
 
-        # 8. 停止采集 + 排空 consumer
         self._stop_event.set()
-        self._stop_collectors()
-        for t in consumers:
-            t.join()
+        for c in (self._mocap, self._imu, self._force):
+            if c is not None:
+                try:
+                    c.stop()
+                    c.join(timeout=5.0)
+                except Exception:  # noqa: BLE001
+                    pass
 
-        # 9. 关闭 CSV + 写元数据
+        for t in consumers:
+            try:
+                t.join()
+            except Exception:  # noqa: BLE001
+                pass
+
         self._close_writers()
-        self._write_metadata()
-        logger.info("采集完成，数据: %s", self._session.dir)
-        return 0
+
+        if self._session is not None:
+            try:
+                self._write_metadata()
+            except Exception:  # noqa: BLE001
+                logger.exception("metadata 写入失败")
 
     # ------------------------------------------------------------------
     # 动捕回调 / 控制循环
@@ -340,17 +378,6 @@ class Orchestrator:
     # ------------------------------------------------------------------
     # 停止 / 清理 / 元数据
     # ------------------------------------------------------------------
-
-    def _stop_collectors(self) -> None:
-        if self._mocap:
-            self._mocap.stop()
-            self._mocap.join(timeout=5.0)
-        if self._imu:
-            self._imu.stop()
-            self._imu.join(timeout=5.0)
-        if self._force:
-            self._force.stop()
-            self._force.join(timeout=5.0)
 
     def _close_writers(self) -> None:
         for w in self._writers.values():
