@@ -38,6 +38,7 @@ from collect.sensors.force import ForceCollector
 from collect.sensors.imu import ImuCollector
 from collect.session import SessionManager
 from collect.writer import CsvWriter
+from control.calibration import Calibration
 from control.pid import PIDController
 from hardware.mocap import MockMocap, MocapReader, Pose
 from hardware.servo import MockServoBus, ServoBus
@@ -52,9 +53,6 @@ LIMIT = 400.0
 DEADBAND = 0.2
 ALPHA = 0.3
 
-# 动捕欧拉角 → 前后/左右 的默认映射（example_code 实测；M3 符号标定确认）
-FRONT_BACK_FROM_ROLL = True
-LEFT_RIGHT_FROM_PITCH = True
 
 QUEUE_MAXSIZE = 5000
 
@@ -70,6 +68,7 @@ def parse_args() -> argparse.Namespace:
     p.add_argument("--duration", type=float, default=30.0, help="运行时长 s（默认 30）")
     p.add_argument("--ip", default="10.1.1.198", help="动捕服务器 IP")
     p.add_argument("--servo-port", default=None, help="舵机串口（真实模式必填）")
+    p.add_argument("--calibration", default=None, help="标定 JSON（缺省用默认映射）")
     p.add_argument("--rb", type=int, default=0, help="动捕刚体索引")
     p.add_argument("--no-imu", action="store_true", help="不采集 IMU")
     p.add_argument("--no-force", action="store_true", help="不采集力传感器")
@@ -79,18 +78,26 @@ def parse_args() -> argparse.Namespace:
     return p.parse_args()
 
 
+RAMP_IN_S = 2.0  # 缓启动时长（M2 实机：直发阶跃超调 ~72%）
+
+
 def make_traj(args: argparse.Namespace):
+    def ramp(t):
+        return 1.0 if t >= RAMP_IN_S else (t / RAMP_IN_S)
+
     if args.circle:
         amp, period = args.circle
 
         def traj(t):
-            return (amp * math.cos(2 * math.pi * t / period),
-                    amp * math.sin(2 * math.pi * t / period))
+            r = ramp(t)
+            return (amp * math.cos(2 * math.pi * t / period) * r,
+                    amp * math.sin(2 * math.pi * t / period) * r)
     elif args.hold:
         fb0, lr0 = args.hold
 
         def traj(t):
-            return (fb0, lr0)
+            r = ramp(t)
+            return (fb0 * r, lr0 * r)
     else:
 
         def traj(t):
@@ -104,6 +111,7 @@ class Orchestrator:
         self._traj = make_traj(args)
         self._segment_id = args.segment_id
         self._phase = CollectionPhase.EXPLORATION
+        self._calib = Calibration.load(args.calibration) if args.calibration else Calibration.default()
 
         self._stop_event = threading.Event()
         self._q_mocap = queue.Queue(maxsize=QUEUE_MAXSIZE)
@@ -277,8 +285,7 @@ class Orchestrator:
                 time.sleep(dt)
                 continue
 
-            curr_fb = pose.roll if FRONT_BACK_FROM_ROLL else -pose.roll
-            curr_lr = pose.pitch if LEFT_RIGHT_FROM_PITCH else -pose.pitch
+            curr_fb, curr_lr = self._calib.map_pose(pose.roll, pose.pitch)
 
             pid_fb.target = t_fb
             pid_lr.target = t_lr
