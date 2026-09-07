@@ -40,6 +40,8 @@ from collect.session import SessionManager
 from collect.writer import CsvWriter
 from control.calibration import Calibration
 from control.pid import PIDController
+from excite.guardian import Guardian
+from excite.signals import default_segments, sample_segment
 from hardware.mocap import MockMocap, MocapReader, Pose
 from hardware.servo import MockServoBus, ServoBus
 
@@ -75,6 +77,10 @@ def parse_args() -> argparse.Namespace:
     p.add_argument("--force-port", default=None, help="力传感器串口（启用采集时必填）")
     p.add_argument("--out", default="collect/logs", help="会话根目录")
     p.add_argument("--segment-id", type=int, default=0, help="闭环数据段 id（默认 0）")
+    p.add_argument("--open-loop", action="store_true", help="开环激励模式（替代闭环）")
+    p.add_argument("--open-loop-fs", type=float, default=100.0, help="开环激励频率 Hz")
+    p.add_argument("--open-loop-duration", type=float, default=None,
+                   help="开环总时长上限 s（缺省=跑完所有激励段）")
     return p.parse_args()
 
 
@@ -126,6 +132,7 @@ class Orchestrator:
         self._writers: dict[str, CsvWriter] = {}
         self._session = None
         self._dropped = {"mocap": 0, "servo": 0}
+        self._guardian = None
 
     # ------------------------------------------------------------------
 
@@ -191,13 +198,22 @@ class Orchestrator:
             # 5. consumer 线程
             consumers = self._start_consumers()
 
-            # 6. 闭环控制循环
-            mode = "mock" if args.mock else ("dry-run" if args.dry_run else f"串口 {args.servo_port}")
-            logger.info("闭环采集启动（%dHz），模式=%s，时长 %.0fs",
-                        LOOP_HZ, mode, args.duration)
-            self._run_control_loop(args.duration)
+            # 6. guardian（开环/闭环都兜底，急停=回中位 70°）
+            self._guardian = Guardian(self._mocap, self._bus, self._calib)
+            self._guardian.start()
 
-            # 7. 收尾：回中位
+            # 7. 控制循环（开环激励 或 闭环 PID）
+            if args.open_loop:
+                logger.info("开环激励启动（%dHz），段数=%d",
+                            args.open_loop_fs, len(default_segments()))
+                self._run_open_loop(args.open_loop_fs, args.open_loop_duration)
+            else:
+                mode = "mock" if args.mock else ("dry-run" if args.dry_run else f"串口 {args.servo_port}")
+                logger.info("闭环采集启动（%dHz），模式=%s，时长 %.0fs",
+                            LOOP_HZ, mode, args.duration)
+                self._run_control_loop(args.duration)
+
+            # 8. 收尾：回中位
             logger.info("收尾：回中位 (offset=0, offset=0)")
             self._bus.send_pair(0, 0)
             time.sleep(1.5)
@@ -218,6 +234,12 @@ class Orchestrator:
                 pass
 
         self._stop_event.set()
+        if self._guardian is not None:
+            try:
+                self._guardian.stop()
+                self._guardian.join(timeout=2.0)
+            except Exception:  # noqa: BLE001
+                pass
         for c in (self._mocap, self._imu, self._force):
             if c is not None:
                 try:
@@ -316,6 +338,54 @@ class Orchestrator:
                 time.sleep(sleep_s)
             else:
                 next_t = time.perf_counter()  # 掉拍重新对齐
+
+    def _run_open_loop(self, fs: float, duration_s: float | None = None) -> None:
+        """开环激励执行：逐段发 offset，每段一个 segment_id，guardian 触发即停。"""
+        dt = 1.0 / fs
+        t_start = time.perf_counter()
+        segments = default_segments()
+        for seg_id, seg in enumerate(segments):
+            if duration_s is not None and time.perf_counter() - t_start >= duration_s:
+                break
+            t_seq, fb_seq, lr_seq = sample_segment(seg, fs)
+            logger.info("激励段 %d/%d: kind=%s 采样数=%d",
+                        seg_id, len(segments), seg["kind"], len(t_seq))
+            for i in range(len(t_seq)):
+                if self._stop_event.is_set() or self._guardian.is_triggered:
+                    return
+                if duration_s is not None and time.perf_counter() - t_start >= duration_s:
+                    return
+                fb_off = int(fb_seq[i])
+                lr_off = int(lr_seq[i])
+                self._bus.send_pair(fb_off, lr_off)
+
+                pose = self._mocap.get_pose()
+                curr_fb = curr_lr = 0.0
+                if pose is not None:
+                    curr_fb, curr_lr = self._calib.map_pose(pose.roll, pose.pitch)
+
+                state = ServoState(
+                    pc_timestamp_ns=time.perf_counter_ns(),
+                    pc_receive_unix_time_ms=int(time.time() * 1000),
+                    t_s=round(t_seq[i], 4),
+                    target_front_back_deg=0.0,   # 开环无目标角
+                    target_left_right_deg=0.0,
+                    current_front_back_deg=curr_fb,
+                    current_left_right_deg=curr_lr,
+                    servo_front_back_offset=fb_off,
+                    servo_left_right_offset=lr_off,
+                    segment_id=seg_id,
+                )
+                try:
+                    self._q_servo.put_nowait(state)
+                except queue.Full:
+                    self._dropped["servo"] += 1
+
+                next_t = time.perf_counter() + dt
+                sleep_s = next_t - time.perf_counter()
+                if sleep_s > 0:
+                    time.sleep(sleep_s)
+        logger.info("开环激励完成")
 
     # ------------------------------------------------------------------
     # CSV 写入器 + consumer
