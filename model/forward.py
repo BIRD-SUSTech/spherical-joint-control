@@ -60,3 +60,34 @@ def rollout(W: np.ndarray, q: np.ndarray, u: np.ndarray, seg: np.ndarray,
             q_pred[k + 1] = q_pred[k] + dq
 
     return q_pred
+
+
+def fit_direction_segmented(X: np.ndarray, y: np.ndarray, u: np.ndarray) -> dict:
+    """F_v1：按方向分段线性。
+
+    每个输出轴（fb/lr）按对应输入轴 sign(u) 分正负两组，各拟合一个 W。
+    返回 dict{"fb_pos": W, "fb_neg": W, "lr_pos": W, "lr_neg": W}。
+    每个 W 形状 (in_dim+1, 2)，预测时取对应轴的输出列（保留交叉耦合）。
+    """
+    models = {}
+    for out_axis, u_axis, name in [(0, 0, "fb"), (1, 1, "lr")]:
+        for sign_val, label in [(1, "pos"), (-1, "neg")]:
+            mask = np.sign(u[:, u_axis]) == sign_val
+            if mask.sum() < 10:
+                models[f"{name}_{label}"] = None
+            else:
+                models[f"{name}_{label}"] = fit_linear(X[mask], y[mask])
+    return models
+
+
+def predict_segmented(models: dict, X: np.ndarray, u: np.ndarray) -> np.ndarray:
+    """F_v1：按方向分段预测 Δq。"""
+    y_hat = np.zeros((X.shape[0], 2))
+    Xb = np.hstack([X, np.ones((X.shape[0], 1))])
+    for out_axis, u_axis, name in [(0, 0, "fb"), (1, 1, "lr")]:
+        for sign_val, label in [(1, "pos"), (-1, "neg")]:
+            mask = np.sign(u[:, u_axis]) == sign_val
+            W = models[f"{name}_{label}"]
+            if W is not None and mask.sum() > 0:
+                y_hat[mask, out_axis] = (Xb[mask] @ W)[:, out_axis]
+    return y_hat

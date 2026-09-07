@@ -13,7 +13,7 @@ from pathlib import Path
 import numpy as np
 
 from model.dataset import build_windows, feature_names, load_session
-from model.forward import fit_linear, predict, rollout
+from model.forward import fit_direction_segmented, fit_linear, predict, predict_segmented, rollout
 from model.residual import decompose, format_report
 
 
@@ -24,6 +24,7 @@ def main() -> int:
     ap.add_argument("--seq-len", type=int, default=5, help="q/u 历史窗口步数")
     ap.add_argument("--holdout", type=int, default=None, help="留出段 id（缺省=最后一段）")
     ap.add_argument("--rollout", action="store_true", help="额外跑 free-running rollout")
+    ap.add_argument("--segmented", action="store_true", help="F_v1：方向分段线性（按 sign(u) 分段）")
     args = ap.parse_args()
 
     # 读多个会话并合并（段 id 加偏移保证跨会话唯一）
@@ -51,10 +52,17 @@ def main() -> int:
     tr = seg_ids != holdout
     va = seg_ids == holdout
 
-    W = fit_linear(X[tr], y[tr])
+    if args.segmented:
+        models = fit_direction_segmented(X[tr], y[tr], u_k[tr])
+        y_hat = predict_segmented(models, X[va], u_k[va])
+        W = fit_linear(X[tr], y[tr])  # 额外线性 W，供 rollout（分段 rollout 未实现）
+        print("模型: F_v1 方向分段线性")
+    else:
+        W = fit_linear(X[tr], y[tr])
+        y_hat = predict(W, X[va])
+        print("模型: F_v0 线性 ARX")
 
     # 1-step 残差（留出段）
-    y_hat = predict(W, X[va])
     e = y[va] - y_hat
     mae = np.abs(e).mean(axis=0)
     rmse = np.sqrt((e ** 2).mean(axis=0))
