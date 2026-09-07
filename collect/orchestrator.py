@@ -297,6 +297,8 @@ class Orchestrator:
         next_t = t0
 
         while not self._stop_event.is_set():
+            if self._guardian is not None and self._guardian.is_triggered:
+                return
             t = time.perf_counter() - t0
             if t >= duration_s:
                 break
@@ -344,10 +346,12 @@ class Orchestrator:
         dt = 1.0 / fs
         t_start = time.perf_counter()
         segments = default_segments()
+        gains = self._calib.gain_deg_per_offset
         for seg_id, seg in enumerate(segments):
             if duration_s is not None and time.perf_counter() - t_start >= duration_s:
                 break
-            t_seq, fb_seq, lr_seq = sample_segment(seg, fs)
+            t_seq, fb_seq, lr_seq = sample_segment(seg, fs,
+                                                   gains["front_back"], gains["left_right"])
             logger.info("激励段 %d/%d: kind=%s 采样数=%d",
                         seg_id, len(segments), seg["kind"], len(t_seq))
             for i in range(len(t_seq)):
@@ -479,7 +483,7 @@ class Orchestrator:
         metadata = {
             "session_dir": str(self._session.dir),
             "started_at": datetime.now().isoformat(),
-            "mode": "mock" if self._args.mock else ("dry-run" if self._args.dry_run else "closed_loop"),
+            "mode": "mock" if self._args.mock else ("dry-run" if self._args.dry_run else ("open_loop" if self._args.open_loop else "closed_loop")),
             "segment_id": self._segment_id,
             "row_counts": row_counts,
             "dropped_frames": dropped,

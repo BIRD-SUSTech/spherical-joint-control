@@ -5,32 +5,33 @@
     - triangle：往返三角波 → 暴露换向迟滞
     - lissajous：低速大摆幅 2D 织网 → 覆盖工作空间与速度区间
 
-幅度以"关节角(度)"给出，内部用 M3 标定增益换算 offset：
-    offset = deg / gain，fb 增益 0.0357、lr 增益 0.0428（calibrations/rig1.json）。
+幅度以"关节角(度)"给出，内部用增益换算 offset：offset = deg / gain。
+增益缺省用 M3 标定值（calibrations/rig1.json），可由调用方传入覆盖（单一事实源）。
 """
 
 from __future__ import annotations
 
 import math
 
-GAIN_FB = 0.0357   # °/offset（M3 标定，前后）
-GAIN_LR = 0.0428   # °/offset（M3 标定，左右）
+GAIN_FB = 0.0357   # °/offset（M3 标定缺省，前后）
+GAIN_LR = 0.0428   # °/offset（M3 标定缺省，左右）
 
 
-def deg_to_offset(deg: float, axis: str) -> float:
-    gain = GAIN_FB if axis == "fb" else GAIN_LR
+def deg_to_offset(deg: float, axis: str, gain_fb: float = GAIN_FB, gain_lr: float = GAIN_LR) -> float:
+    gain = gain_fb if axis == "fb" else gain_lr
     return deg / gain
 
 
-def lissajous(amp_fb_deg, amp_lr_deg, f1, f2, fs, duration_s, phase=0.0):
+def lissajous(amp_fb_deg, amp_lr_deg, f1, f2, fs, duration_s, phase=0.0,
+              gain_fb=GAIN_FB, gain_lr=GAIN_LR):
     """平滑 Lissajous：双轴异频，从零差分起。返回 (t, fb, lr)。"""
     t, fb, lr = [], [], []
     n = int(duration_s * fs)
     for i in range(n):
         ti = i / fs
         t.append(ti)
-        fb.append(deg_to_offset(amp_fb_deg * math.sin(2 * math.pi * f1 * ti), "fb"))
-        lr.append(deg_to_offset(amp_lr_deg * math.sin(2 * math.pi * f2 * ti + phase), "lr"))
+        fb.append(deg_to_offset(amp_fb_deg * math.sin(2 * math.pi * f1 * ti), "fb", gain_fb, gain_lr))
+        lr.append(deg_to_offset(amp_lr_deg * math.sin(2 * math.pi * f2 * ti + phase), "lr", gain_fb, gain_lr))
     return t, fb, lr
 
 
@@ -43,7 +44,8 @@ def _tri_wave(phase: float) -> float:
     return -1.0 + (phase - 0.75) / 0.25
 
 
-def triangle(axis: str, amp_deg: float, freq: float, fs: float, duration_s: float):
+def triangle(axis: str, amp_deg: float, freq: float, fs: float, duration_s: float,
+             gain_fb=GAIN_FB, gain_lr=GAIN_LR):
     """单轴往返三角波（恒定速度、换向清晰），暴露迟滞。返回 (t, fb, lr)。"""
     t, fb, lr = [], [], []
     n = int(duration_s * fs)
@@ -53,21 +55,22 @@ def triangle(axis: str, amp_deg: float, freq: float, fs: float, duration_s: floa
         tri = amp_deg * _tri_wave((ti % period) / period)
         t.append(ti)
         if axis == "fb":
-            fb.append(deg_to_offset(tri, "fb"))
+            fb.append(deg_to_offset(tri, "fb", gain_fb, gain_lr))
             lr.append(0.0)
         else:
             fb.append(0.0)
-            lr.append(deg_to_offset(tri, "lr"))
+            lr.append(deg_to_offset(tri, "lr", gain_fb, gain_lr))
     return t, fb, lr
 
 
-def steps(axis: str, amps_deg, hold_s: float, settle_s: float, fs: float):
+def steps(axis: str, amps_deg, hold_s: float, settle_s: float, fs: float,
+          gain_fb=GAIN_FB, gain_lr=GAIN_LR):
     """单轴微幅阶跃序列：每个幅度正负各一次，步间回中位。返回 (t, fb, lr)。"""
     t, fb, lr = [], [], []
     ti = 0.0
     for amp in amps_deg:
         for s in (+1, -1):
-            off = deg_to_offset(amp * s, axis)
+            off = deg_to_offset(amp * s, axis, gain_fb, gain_lr)
             for _ in range(int(hold_s * fs)):
                 t.append(ti)
                 fb.append(off if axis == "fb" else 0.0)
@@ -93,14 +96,16 @@ def default_segments():
     ]
 
 
-def sample_segment(seg: dict, fs: float):
+def sample_segment(seg: dict, fs: float, gain_fb: float = GAIN_FB, gain_lr: float = GAIN_LR):
     """展开一条激励段 → (t, fb, lr)。seg 见 default_segments()。"""
     kind = seg["kind"]
     if kind == "lissajous":
         return lissajous(seg["amp_fb_deg"], seg["amp_lr_deg"], seg["f1"], seg["f2"],
-                         fs, seg["duration_s"])
+                         fs, seg["duration_s"], gain_fb=gain_fb, gain_lr=gain_lr)
     if kind == "triangle":
-        return triangle(seg["axis"], seg["amp_deg"], seg["freq"], fs, seg["duration_s"])
+        return triangle(seg["axis"], seg["amp_deg"], seg["freq"], fs, seg["duration_s"],
+                        gain_fb=gain_fb, gain_lr=gain_lr)
     if kind == "steps":
-        return steps(seg["axis"], seg["amps_deg"], seg["hold_s"], seg["settle_s"], fs)
+        return steps(seg["axis"], seg["amps_deg"], seg["hold_s"], seg["settle_s"], fs,
+                     gain_fb=gain_fb, gain_lr=gain_lr)
     raise ValueError(f"unknown segment kind: {kind}")
