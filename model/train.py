@@ -68,13 +68,26 @@ def main() -> int:
     print()
     print(format_report(results, "lr"))
 
-    # 可选 rollout
+    # 可选 rollout：free-running 误差 + 四维残差分解（误差主源在这里）
     if args.rollout:
+        from model.dataset import compute_qdot, compute_since_reversal
         q_pred = rollout(W, q, u, seg, args.seq_len)
         err = q_pred - q
-        # 只统计留出段的 rollout 误差（后 seq_len 起）
-        print(f"\nrollout MAE fb={np.abs(err[:, 0]).mean():.4f}° "
-              f"lr={np.abs(err[:, 1]).mean():.4f}°")
+        # warm-up：排除每段前 seq_len 拍（rollout 未自回归，误差恒 0）
+        mask = np.ones(len(q), dtype=bool)
+        for gid in np.unique(seg):
+            idx = np.where(seg == gid)[0]
+            mask[idx[:args.seq_len]] = False
+        print(f"\nrollout MAE fb={np.abs(err[mask, 0]).mean():.4f}° "
+              f"lr={np.abs(err[mask, 1]).mean():.4f}°")
+
+        qdot_all = compute_qdot(q)
+        since_all = compute_since_reversal(qdot_all)
+        rres = decompose(err[mask], q[mask], u[mask], qdot_all[mask], since_all[mask])
+        print("\n--- rollout 残差分解（四维）---")
+        print(format_report(rres, "fb"))
+        print()
+        print(format_report(rres, "lr"))
 
     return 0
 

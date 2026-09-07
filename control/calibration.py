@@ -21,7 +21,8 @@ class Calibration:
 
     def __post_init__(self):
         if self.gain_deg_per_offset is None:
-            self.gain_deg_per_offset = {"front_back": 0.025, "left_right": 0.025}
+            # 缺省 = rig1 的 M4 实测 ±5° 有效增益（单一事实源，见 calibrations/rig1.json）
+            self.gain_deg_per_offset = {"front_back": 0.057, "left_right": 0.059}
 
     @classmethod
     def default(cls) -> "Calibration":
