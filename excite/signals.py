@@ -13,8 +13,8 @@ from __future__ import annotations
 
 import math
 
-GAIN_FB = 0.0357   # °/offset（M3 标定缺省，前后）
-GAIN_LR = 0.0428   # °/offset（M3 标定缺省，左右）
+GAIN_FB = 0.057    # °/offset（M4 开环实测 ±5° 有效增益，前后）
+GAIN_LR = 0.059    # °/offset（M4 开环实测 ±5° 有效增益，左右）
 
 
 def deg_to_offset(deg: float, axis: str, gain_fb: float = GAIN_FB, gain_lr: float = GAIN_LR) -> float:
@@ -91,6 +91,37 @@ def default_segments():
         {"kind": "steps", "axis": "lr", "amps_deg": [1.0, 2.0], "hold_s": 3.0, "settle_s": 1.0},
         {"kind": "triangle", "axis": "fb", "amp_deg": 5.0, "freq": 0.1, "duration_s": 20.0},
         {"kind": "triangle", "axis": "lr", "amp_deg": 5.0, "freq": 0.1, "duration_s": 20.0},
+        {"kind": "lissajous", "amp_fb_deg": 5.0, "amp_lr_deg": 5.0,
+         "f1": 0.1, "f2": 0.16, "duration_s": 30.0},
+    ]
+
+
+def extended_segments():
+    """补数据激励段（M5 充分数据采集，批次 A + C，约 228s）。
+
+    目的（对应 M5 残差结论的补强）：
+        - 大角度 ±10° → 增益非线性（滚雪球第一步）
+        - 高频 0.3/0.5Hz → 动态/相位滞后
+        - 多幅度阶跃 → 死区/增益曲线
+        - 重复 M4 关键段 → 一致性验证（用户对单会话结论不信任）
+    幅度用 M4 有效增益 0.057/0.059 反算，guardian 70° 兜底。
+    """
+    return [
+        # 批次 A：大角度
+        {"kind": "triangle", "axis": "fb", "amp_deg": 10.0, "freq": 0.1, "duration_s": 20.0},
+        {"kind": "triangle", "axis": "lr", "amp_deg": 10.0, "freq": 0.1, "duration_s": 20.0},
+        # 批次 A：高频
+        {"kind": "triangle", "axis": "fb", "amp_deg": 5.0, "freq": 0.3, "duration_s": 20.0},
+        {"kind": "triangle", "axis": "fb", "amp_deg": 5.0, "freq": 0.5, "duration_s": 20.0},
+        {"kind": "triangle", "axis": "lr", "amp_deg": 5.0, "freq": 0.3, "duration_s": 20.0},
+        # 批次 A：大角度 2D 覆盖
+        {"kind": "lissajous", "amp_fb_deg": 10.0, "amp_lr_deg": 10.0,
+         "f1": 0.1, "f2": 0.16, "duration_s": 30.0},
+        # 批次 A：多幅度阶跃（死区/增益曲线）
+        {"kind": "steps", "axis": "fb", "amps_deg": [1.0, 2.0, 5.0], "hold_s": 3.0, "settle_s": 1.0},
+        {"kind": "steps", "axis": "lr", "amps_deg": [1.0, 2.0, 5.0], "hold_s": 3.0, "settle_s": 1.0},
+        # 批次 C：重复性（与 M4 关键段一致，验证一致性）
+        {"kind": "triangle", "axis": "fb", "amp_deg": 5.0, "freq": 0.1, "duration_s": 20.0},
         {"kind": "lissajous", "amp_fb_deg": 5.0, "amp_lr_deg": 5.0,
          "f1": 0.1, "f2": 0.16, "duration_s": 30.0},
     ]

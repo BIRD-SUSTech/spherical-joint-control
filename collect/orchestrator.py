@@ -41,7 +41,7 @@ from collect.writer import CsvWriter
 from control.calibration import Calibration
 from control.pid import PIDController
 from excite.guardian import Guardian
-from excite.signals import default_segments, sample_segment
+from excite.signals import default_segments, extended_segments, sample_segment
 from hardware.mocap import MockMocap, MocapReader, Pose
 from hardware.servo import MockServoBus, ServoBus
 
@@ -81,6 +81,7 @@ def parse_args() -> argparse.Namespace:
     p.add_argument("--open-loop-fs", type=float, default=100.0, help="开环激励频率 Hz")
     p.add_argument("--open-loop-duration", type=float, default=None,
                    help="开环总时长上限 s（缺省=跑完所有激励段）")
+    p.add_argument("--extended", action="store_true", help="用补数据扩展激励段（M5 充分采集）")
     return p.parse_args()
 
 
@@ -204,8 +205,10 @@ class Orchestrator:
 
             # 7. 控制循环（开环激励 或 闭环 PID）
             if args.open_loop:
-                logger.info("开环激励启动（%dHz），段数=%d",
-                            args.open_loop_fs, len(default_segments()))
+                segs = extended_segments() if args.extended else default_segments()
+                logger.info("开环激励启动（%dHz），段数=%d（%s）",
+                            args.open_loop_fs, len(segs),
+                            "extended" if args.extended else "default")
                 self._run_open_loop(args.open_loop_fs, args.open_loop_duration)
             else:
                 mode = "mock" if args.mock else ("dry-run" if args.dry_run else f"串口 {args.servo_port}")
@@ -345,7 +348,7 @@ class Orchestrator:
         """开环激励执行：逐段发 offset，每段一个 segment_id，guardian 触发即停。"""
         dt = 1.0 / fs
         t_start = time.perf_counter()
-        segments = default_segments()
+        segments = extended_segments() if self._args.extended else default_segments()
         gains = self._calib.gain_deg_per_offset
         for seg_id, seg in enumerate(segments):
             if duration_s is not None and time.perf_counter() - t_start >= duration_s:

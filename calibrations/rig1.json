@@ -4,12 +4,12 @@
   "front_back_sign": 1,
   "left_right_sign": 1,
   "gain_deg_per_offset": {
-    "front_back": 0.03572502530046872,
-    "left_right": 0.04280160412819701
+    "front_back": 0.057,
+    "left_right": 0.059
   },
   "gain_matrix_roll_pitch": [
-    [0.03572502530046872, 2.5984405406883784e-05],
-    [-0.00028495490550994873, 0.04280160412819701]
+    [0.057, 0.00003],
+    [-0.00028, 0.059]
   ],
   "num_samples": 12,
   "step_offsets": [20, 40, 60]
