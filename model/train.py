@@ -19,21 +19,31 @@ from model.residual import decompose, format_report
 
 def main() -> int:
     ap = argparse.ArgumentParser(description="M5 前向模型训练 + 残差分解")
-    ap.add_argument("--session", required=True, help="会话目录（含 servo_data.csv）")
+    ap.add_argument("--session", nargs="+", required=True,
+                    help="会话目录或 servo_data.csv（可多个，合并训练）")
     ap.add_argument("--seq-len", type=int, default=5, help="q/u 历史窗口步数")
     ap.add_argument("--holdout", type=int, default=None, help="留出段 id（缺省=最后一段）")
     ap.add_argument("--rollout", action="store_true", help="额外跑 free-running rollout")
     args = ap.parse_args()
 
-    session = Path(args.session)
-    csv_path = session / "servo_data.csv" if session.is_dir() else session
-    if not csv_path.exists():
-        print(f"文件不存在: {csv_path}", file=sys.stderr)
-        return 1
+    # 读多个会话并合并（段 id 加偏移保证跨会话唯一）
+    qs, us, segs = [], [], []
+    for i, s in enumerate(args.session):
+        p = Path(s)
+        csv_path = p / "servo_data.csv" if p.is_dir() else p
+        if not csv_path.exists():
+            print(f"文件不存在: {csv_path}", file=sys.stderr)
+            return 1
+        q, u, seg = load_session(csv_path)
+        qs.append(q)
+        us.append(u)
+        segs.append(seg + i * 1000)
+    q = np.concatenate(qs)
+    u = np.concatenate(us)
+    seg = np.concatenate(segs)
 
-    q, u, seg = load_session(csv_path)
     X, y, seg_ids, q_k, u_k, qdot_k, since_k = build_windows(q, u, seg, args.seq_len)
-    print(f"样本: {X.shape[0]} 窗口, 特征维度 {X.shape[1]}")
+    print(f"会话数: {len(args.session)}, 样本: {X.shape[0]} 窗口, 特征维度 {X.shape[1]}")
     print(f"段: {sorted(np.unique(seg_ids).tolist())}")
 
     # leave-one-segment-out
