@@ -54,6 +54,7 @@ def parse_args() -> argparse.Namespace:
     p.add_argument("--ip", default="10.1.1.198", help="动捕服务器 IP")
     p.add_argument("--servo-port", default=None, help="舵机串口（真实模式必填）")
     p.add_argument("--calibration", default=None, help="标定 JSON（缺省用默认映射）")
+    p.add_argument("--feedforward", action="store_true", help="加方向分段增益前馈（u_ff+u_fb）")
     p.add_argument("--rb", type=int, default=0, help="动捕刚体索引")
     p.add_argument("--no-csv", action="store_true", help="不写闭环 CSV")
     return p.parse_args()
@@ -167,6 +168,11 @@ def main() -> int:
             pid_lr.target = t_lr
             out_fb = pid_fb.calculate(curr_fb)
             out_lr = pid_lr.calculate(curr_lr)
+
+            if args.feedforward:
+                ff_fb, ff_lr = calib.feedforward(t_fb, t_lr)
+                out_fb = ff_fb + out_fb
+                out_lr = ff_lr + out_lr
 
             bus.send_pair(int(out_fb), int(out_lr))
 

@@ -7,6 +7,10 @@
     "front_back": 0.057,
     "left_right": 0.059
   },
+  "direction_gains": {
+    "fb": {"pos": 0.0721, "neg": 0.0433},
+    "lr": {"pos": 0.0587, "neg": 0.0601}
+  },
   "gain_matrix_roll_pitch": [
     [0.057, 0.00003],
     [-0.00028, 0.059]

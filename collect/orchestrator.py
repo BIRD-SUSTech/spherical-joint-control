@@ -71,6 +71,8 @@ def parse_args() -> argparse.Namespace:
     p.add_argument("--ip", default="10.1.1.198", help="动捕服务器 IP")
     p.add_argument("--servo-port", default=None, help="舵机串口（真实模式必填）")
     p.add_argument("--calibration", default=None, help="标定 JSON（缺省用默认映射）")
+    p.add_argument("--feedforward", action="store_true", help="加方向分段增益前馈（u_ff+u_fb）")
+    p.add_argument("--ab", action="store_true", help="自动 A/B：同轨迹跑 baseline + 前馈两段")
     p.add_argument("--rb", type=int, default=0, help="动捕刚体索引")
     p.add_argument("--no-imu", action="store_true", help="不采集 IMU")
     p.add_argument("--no-force", action="store_true", help="不采集力传感器")
@@ -210,11 +212,17 @@ class Orchestrator:
                             args.open_loop_fs, len(segs),
                             "extended" if args.extended else "default")
                 self._run_open_loop(args.open_loop_fs, args.open_loop_duration)
+            elif args.ab:
+                logger.info("A/B 对照：段0 baseline(u_ff=0) + 段1 前馈")
+                self._run_control_loop(args.duration, feedforward=False, segment_id=0)
+                self._bus.send_pair(0, 0)
+                time.sleep(2.0)  # 段间回中位静置
+                self._run_control_loop(args.duration, feedforward=True, segment_id=1)
             else:
                 mode = "mock" if args.mock else ("dry-run" if args.dry_run else f"串口 {args.servo_port}")
                 logger.info("闭环采集启动（%dHz），模式=%s，时长 %.0fs",
                             LOOP_HZ, mode, args.duration)
-                self._run_control_loop(args.duration)
+                self._run_control_loop(args.duration, feedforward=args.feedforward)
 
             # 8. 收尾：回中位
             logger.info("收尾：回中位 (offset=0, offset=0)")
@@ -289,7 +297,8 @@ class Orchestrator:
         except queue.Full:
             self._dropped["mocap"] += 1
 
-    def _run_control_loop(self, duration_s: float) -> None:
+    def _run_control_loop(self, duration_s: float, feedforward: bool = False,
+                          segment_id: int | None = None) -> None:
         pid_fb = PIDController(kp=KP, ki=KI, kd=KD, limit=LIMIT,
                                deadband=DEADBAND, alpha=ALPHA)
         pid_lr = PIDController(kp=KP, ki=KI, kd=KD, limit=LIMIT,
@@ -318,6 +327,10 @@ class Orchestrator:
             pid_lr.target = t_lr
             out_fb = int(pid_fb.calculate(curr_fb))
             out_lr = int(pid_lr.calculate(curr_lr))
+            if feedforward:
+                ff_fb, ff_lr = self._calib.feedforward(t_fb, t_lr)
+                out_fb = int(ff_fb + out_fb)
+                out_lr = int(ff_lr + out_lr)
             self._bus.send_pair(out_fb, out_lr)
 
             state = ServoState(
@@ -330,7 +343,7 @@ class Orchestrator:
                 current_left_right_deg=curr_lr,
                 servo_front_back_offset=out_fb,
                 servo_left_right_offset=out_lr,
-                segment_id=self._segment_id,
+                segment_id=segment_id if segment_id is not None else self._segment_id,
             )
             try:
                 self._q_servo.put_nowait(state)
