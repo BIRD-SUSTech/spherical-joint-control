@@ -518,11 +518,37 @@ class Orchestrator:
             "segment_id": self._segment_id,
             "row_counts": row_counts,
             "dropped_frames": dropped,
+            "config": {
+                "trajectory": _trajectory_info(self._args),
+                "calibration": self._args.calibration,
+                "controller_config": self._args.controller_config,
+                "baseline_controller_config": self._args.baseline_controller_config,
+                "controller": {
+                    "gain_poly": self._controller.gain_poly,
+                    "direction_gains": self._controller.direction_gains,
+                    "slew_limit": self._controller.slew_limit,
+                    "hysteresis": self._controller.hysteresis,
+                },
+                "servo_port": self._args.servo_port,
+                "force_port": self._args.force_port,
+                "duration": self._args.duration,
+                "ab": self._args.ab,
+                "inter_segment_settle": self._args.inter_segment_settle,
+            },
         }
         self._session.metadata_json.write_text(
             json.dumps(metadata, indent=2, ensure_ascii=False, default=str),
             encoding="utf-8",
         )
+
+
+def _trajectory_info(args) -> dict:
+    """从 args 提取轨迹类型 + 参数。"""
+    for name in ("circle", "hold", "lissajous", "eight", "variable_circle", "waypoints"):
+        val = getattr(args, name, None)
+        if val is not None:
+            return {"type": name, "params": val}
+    return {"type": "idle", "params": None}
 
 
 def main() -> int:
