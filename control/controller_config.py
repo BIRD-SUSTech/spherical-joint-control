@@ -23,6 +23,7 @@ class ControllerConfig:
     direction_gains: dict | None = None   # {"fb": {"pos","neg"}, "lr": {"pos","neg"}}
     gain_poly: dict | None = None         # {"fb": [b0,b1,b2,b3], "lr": [...]} 逆映射 g(q)
     slew_limit: float | None = None       # u_ff 每拍变化上限（offset/拍），None=不限
+    hysteresis: dict | None = None        # {"fb": h, "lr": h} 迟滞补偿（offset），级 2
     # 未来扩展字段在此追加，load 时读取对应 key
 
     _last_uff: tuple = field(default=None, init=False, repr=False)  # 上次前馈输出（slew 用）
@@ -42,17 +43,18 @@ class ControllerConfig:
             direction_gains=data.get("direction_gains"),
             gain_poly=data.get("gain_poly"),
             slew_limit=data.get("slew_limit"),
+            hysteresis=data.get("hysteresis"),
         )
 
     def has_feedforward(self) -> bool:
         """是否启用前馈。"""
         return self.direction_gains is not None or self.gain_poly is not None
 
-    def feedforward(self, q_d_fb: float, q_d_lr: float) -> tuple[float, float]:
-        """前馈反解：目标关节角（度）→ 差分 offset（含 slew 速率整形）。
+    def feedforward(self, q_d_fb: float, q_d_lr: float,
+                    qdot_d_fb: float = 0.0, qdot_d_lr: float = 0.0) -> tuple[float, float]:
+        """前馈反解：目标关节角（度）→ 差分 offset（含迟滞 + slew 整形）。
 
-        优先参数化逆映射 gain_poly（u_ff = g(q_d)，含 bias 补偿）；
-        否则方向分段 direction_gains；都没有则返回 (0,0)。
+        静态基座 = gain_poly（或 direction_gains）；级 2 = 迟滞项 h·sign(q̇_d)。
         """
         if self.gain_poly is not None:
             u_fb = _poly(self.gain_poly["fb"], q_d_fb)
@@ -63,6 +65,11 @@ class ControllerConfig:
             u_lr = q_d_lr / (g["lr"]["pos"] if q_d_lr >= 0 else g["lr"]["neg"])
         else:
             u_fb = u_lr = 0.0
+
+        # 级 2：迟滞补偿 h·sign(q̇_d)
+        if self.hysteresis is not None:
+            u_fb += self.hysteresis.get("fb", 0.0) * (1.0 if qdot_d_fb >= 0 else -1.0)
+            u_lr += self.hysteresis.get("lr", 0.0) * (1.0 if qdot_d_lr >= 0 else -1.0)
 
         # slew 速率整形：限制 u_ff 每拍变化量，防目标突变时前馈跳变
         if self.slew_limit is not None:

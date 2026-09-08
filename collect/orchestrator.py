@@ -317,6 +317,7 @@ class Orchestrator:
         t0 = time.perf_counter()
         dt = 1.0 / LOOP_HZ
         next_t = t0
+        prev_t_fb = prev_t_lr = None
 
         while not self._stop_event.is_set():
             if self._guardian is not None and self._guardian.is_triggered:
@@ -325,6 +326,9 @@ class Orchestrator:
             if t >= duration_s:
                 break
             t_fb, t_lr = self._traj(t)
+            qdot_fb = (t_fb - prev_t_fb) / dt if prev_t_fb is not None else 0.0
+            qdot_lr = (t_lr - prev_t_lr) / dt if prev_t_lr is not None else 0.0
+            prev_t_fb, prev_t_lr = t_fb, t_lr
 
             pose = self._mocap.get_pose()
             if pose is None:
@@ -339,7 +343,7 @@ class Orchestrator:
             out_lr = int(pid_lr.calculate(curr_lr))
             ctrl = controller if controller is not None else self._controller
             if ctrl.has_feedforward():
-                ff_fb, ff_lr = ctrl.feedforward(t_fb, t_lr)
+                ff_fb, ff_lr = ctrl.feedforward(t_fb, t_lr, qdot_fb, qdot_lr)
                 out_fb = int(ff_fb + out_fb)
                 out_lr = int(ff_lr + out_lr)
             self._bus.send_pair(out_fb, out_lr)

@@ -135,11 +135,15 @@ def main() -> int:
     t0 = time.perf_counter()
     dt = 1.0 / LOOP_HZ
     next_t = t0
+    prev_t_fb = prev_t_lr = None
 
     try:
         while (time.perf_counter() - t0) < args.duration:
             t = time.perf_counter() - t0
             t_fb, t_lr = traj(t)
+            qdot_fb = (t_fb - prev_t_fb) / dt if prev_t_fb is not None else 0.0
+            qdot_lr = (t_lr - prev_t_lr) / dt if prev_t_lr is not None else 0.0
+            prev_t_fb, prev_t_lr = t_fb, t_lr
 
             pose = mocap.get_pose()
             if pose is None:
@@ -154,7 +158,7 @@ def main() -> int:
             out_lr = pid_lr.calculate(curr_lr)
 
             if controller.has_feedforward():
-                ff_fb, ff_lr = controller.feedforward(t_fb, t_lr)
+                ff_fb, ff_lr = controller.feedforward(t_fb, t_lr, qdot_fb, qdot_lr)
                 out_fb = ff_fb + out_fb
                 out_lr = ff_lr + out_lr
 
