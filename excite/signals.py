@@ -127,6 +127,24 @@ def extended_segments():
     ]
 
 
+def large_angle_segments():
+    """大角度滚雪球激励段（±15°/±20°，补增益非线性外推数据）。
+
+    M10 发现变速圆 +12° 外推有 +2° 残差（g(q) 只拟合到 ±10°）。
+    本段集用更低频（大摆幅 + 低速）覆盖 ±15°/±20°，guardian 70° 兜底。
+    """
+    return [
+        {"kind": "triangle", "axis": "fb", "amp_deg": 15.0, "freq": 0.08, "duration_s": 25.0},
+        {"kind": "triangle", "axis": "lr", "amp_deg": 15.0, "freq": 0.08, "duration_s": 25.0},
+        {"kind": "triangle", "axis": "fb", "amp_deg": 20.0, "freq": 0.06, "duration_s": 30.0},
+        {"kind": "triangle", "axis": "lr", "amp_deg": 20.0, "freq": 0.06, "duration_s": 30.0},
+        {"kind": "lissajous", "amp_fb_deg": 15.0, "amp_lr_deg": 15.0,
+         "f1": 0.08, "f2": 0.12, "duration_s": 40.0},
+        {"kind": "steps", "axis": "fb", "amps_deg": [5.0, 10.0, 15.0], "hold_s": 4.0, "settle_s": 2.0},
+        {"kind": "steps", "axis": "lr", "amps_deg": [5.0, 10.0, 15.0], "hold_s": 4.0, "settle_s": 2.0},
+    ]
+
+
 def sample_segment(seg: dict, fs: float, gain_fb: float = GAIN_FB, gain_lr: float = GAIN_LR):
     """展开一条激励段 → (t, fb, lr)。seg 见 default_segments()。"""
     kind = seg["kind"]

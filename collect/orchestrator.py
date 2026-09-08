@@ -43,7 +43,7 @@ from control.controller_config import ControllerConfig
 from control.trajectory import make_traj
 from control.pid import PIDController
 from excite.guardian import Guardian
-from excite.signals import default_segments, extended_segments, sample_segment
+from excite.signals import default_segments, extended_segments, large_angle_segments, sample_segment
 from hardware.mocap import MockMocap, MocapReader, Pose
 from hardware.servo import MockServoBus, ServoBus
 
@@ -99,6 +99,7 @@ def parse_args() -> argparse.Namespace:
     p.add_argument("--open-loop-duration", type=float, default=None,
                    help="开环总时长上限 s（缺省=跑完所有激励段）")
     p.add_argument("--extended", action="store_true", help="用补数据扩展激励段（M5 充分采集）")
+    p.add_argument("--large-angle", action="store_true", help="大角度滚雪球激励段（±15°/±20°）")
     return p.parse_args()
 
 
@@ -202,10 +203,10 @@ class Orchestrator:
 
             # 7. 控制循环（开环激励 或 闭环 PID）
             if args.open_loop:
-                segs = extended_segments() if args.extended else default_segments()
+                segs = _pick_segments(args)
                 logger.info("开环激励启动（%dHz），段数=%d（%s）",
                             args.open_loop_fs, len(segs),
-                            "extended" if args.extended else "default")
+                            "large-angle" if args.large_angle else ("extended" if args.extended else "default"))
                 self._run_open_loop(args.open_loop_fs, args.open_loop_duration)
             elif args.ab:
                 base_ctrl = self._baseline_controller
@@ -376,7 +377,7 @@ class Orchestrator:
         """开环激励执行：逐段发 offset，每段一个 segment_id，guardian 触发即停。"""
         dt = 1.0 / fs
         t_start = time.perf_counter()
-        segments = extended_segments() if self._args.extended else default_segments()
+        segments = _pick_segments(self._args)
         gains = self._calib.gain_deg_per_offset
         for seg_id, seg in enumerate(segments):
             if duration_s is not None and time.perf_counter() - t_start >= duration_s:
@@ -549,6 +550,15 @@ def _trajectory_info(args) -> dict:
         if val is not None:
             return {"type": name, "params": val}
     return {"type": "idle", "params": None}
+
+
+def _pick_segments(args):
+    """选择开环激励段集：large-angle > extended > default。"""
+    if args.large_angle:
+        return large_angle_segments()
+    if args.extended:
+        return extended_segments()
+    return default_segments()
 
 
 def main() -> int:
