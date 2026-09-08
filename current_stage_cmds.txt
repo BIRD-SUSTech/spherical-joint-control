@@ -1,31 +1,28 @@
-# 当前阶段命令清单：v7 真版 vs v6 A/B 验证
+# 当前阶段命令清单：circle15 启动瞬态修复复测（--startup-fade）
 # 更新日期：2026-09-08
 # 前置：conda activate spherical_joint；会话回传 M*_verification/data/
 
 # ============================================================
-# 背景：v7 真版（收敛段 ±20° 拟合）已生成，需验证三点：
-#   1) circle15 启动前 2s 瞬态（M12 v7 开环版曾 +166%，真版 bias 变了，看是否缓解）
-#   2) circle20 大角度（v7 开环版已 -47%，真版应保持）
-#   3) waypoints ±20 的 lr（M12 lr +10.5%，真版 lr bias 修正到 +1.06，看是否改善）
-# 对比：seg0=v6（当前 merge 基线）/ seg1=v7 真版
+# 背景：v7 真版在稳态/大角度/waypoints 全过，唯 circle15 启动前 2s
+#   峰值 9.5°（v6 3.4°）阻塞。已加 --startup-fade（默认 1s 前馈渐入）。
+# 对比：seg0=v6（无 fade）/ seg1=v7 真版 + fade
 # ============================================================
 
-# circle 15°/8s（重点看启动前 2s）
-python -m collect.orchestrator --ab --circle 15 8 --duration 60 --servo-port COM5 --force-port COM3 --calibration calibrations/rig1.json --controller-config configs/controller_v7.json --baseline-controller-config configs/controller_v6.json
+# circle 15°/8s（核心复测：启动前 2s 峰值应 ≤ v6 的 3.4°）
+python -m collect.orchestrator --ab --circle 15 8 --duration 60 --servo-port COM5 --force-port COM3 --calibration calibrations/rig1.json --controller-config configs/controller_v7.json --baseline-controller-config configs/controller_v6.json --startup-fade 1.0
 
-# circle 20°/10s（大角度，应保持改善）
-python -m collect.orchestrator --ab --circle 20 10 --duration 60 --servo-port COM5 --force-port COM3 --calibration calibrations/rig1.json --controller-config configs/controller_v7.json --baseline-controller-config configs/controller_v6.json
+# 若启动峰值仍大，可试 fade 延长到 1.5~2s：
+python -m collect.orchestrator --ab --circle 15 8 --duration 60 --servo-port COM5 --force-port COM3 --calibration calibrations/rig1.json --controller-config configs/controller_v7.json --baseline-controller-config configs/controller_v6.json --startup-fade 2.0
 
-# waypoints ±20°（重点看 lr）
-python -m collect.orchestrator --ab --waypoints 20 0 5 -20 0 5 0 20 5 --duration 15 --servo-port COM5 --force-port COM3 --calibration calibrations/rig1.json --controller-config configs/controller_v7.json --baseline-controller-config configs/controller_v6.json
+# circle 20°/10s（顺带复查 lr 散布尖峰）
+python -m collect.orchestrator --ab --circle 20 10 --duration 60 --servo-port COM5 --force-port COM3 --calibration calibrations/rig1.json --controller-config configs/controller_v7.json --baseline-controller-config configs/controller_v6.json --startup-fade 1.0
 
-# 每条跑完立即评测（全段 + 稳态双口径）
+# 每条跑完评测
 python -m valuation.evaluate <session_dir> --all
 
 # ============================================================
-# 判据（每级只能持平或更好，否则回退）
+# 判据
 # ============================================================
-# 1) circle15：启动前 2s 峰值应 ≤ v6（若仍大 → 启动瞬态单独处理：u_ff 渐入/ramp 3s）
-# 2) circle20：MAE/max 应保持 v7 开环版的改善（-47%/-77% 量级）
-# 3) waypoints ±20 lr：应不再 +10.5%（真版 lr bias 已修正）
-# 4) 稳态口径（t>5s）为主，全段口径参考（启动瞬态会污染全段）
+# 1) circle15 启动(0-2s) fb 峰值 ≤ v6 的 ~3.4°（原 9.5° 应被 fade 压下来）
+# 2) circle15 稳态(t>5s) fb 保持 −8% 改善（fade 不应伤害稳态）
+# 3) circle20 保持 fb MAE −19% 改善
