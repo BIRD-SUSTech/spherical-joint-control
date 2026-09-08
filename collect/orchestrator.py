@@ -39,6 +39,7 @@ from collect.sensors.imu import ImuCollector
 from collect.session import SessionManager
 from collect.writer import CsvWriter
 from control.calibration import Calibration
+from control.controller_config import ControllerConfig
 from control.pid import PIDController
 from excite.guardian import Guardian
 from excite.signals import default_segments, extended_segments, sample_segment
@@ -71,10 +72,11 @@ def parse_args() -> argparse.Namespace:
     p.add_argument("--ip", default="10.1.1.198", help="动捕服务器 IP")
     p.add_argument("--servo-port", default=None, help="舵机串口（真实模式必填）")
     p.add_argument("--calibration", default=None, help="标定 JSON（缺省用默认映射）")
-    p.add_argument("--feedforward", action="store_true", help="加方向分段增益前馈（u_ff+u_fb）")
+    p.add_argument("--controller-config", default=None,
+                   help="控制器参数 JSON（前馈增益等；缺省=无前馈 u_ff=0）")
     p.add_argument("--ab", action="store_true", help="自动 A/B：同轨迹跑 baseline + 前馈两段")
-    p.add_argument("--baseline-calibration", default=None,
-                   help="A/B baseline 段的标定 JSON（缺省=u_ff=0 纯反馈；可传上一轮优化参数）")
+    p.add_argument("--baseline-controller-config", default=None,
+                   help="A/B baseline 段的控制器参数 JSON（缺省=u_ff=0；可传上一轮优化参数）")
     p.add_argument("--rb", type=int, default=0, help="动捕刚体索引")
     p.add_argument("--no-imu", action="store_true", help="不采集 IMU")
     p.add_argument("--no-force", action="store_true", help="不采集力传感器")
@@ -123,8 +125,10 @@ class Orchestrator:
         self._segment_id = args.segment_id
         self._phase = CollectionPhase.EXPLORATION
         self._calib = Calibration.load(args.calibration) if args.calibration else Calibration.default()
-        self._baseline_calib = (Calibration.load(args.baseline_calibration)
-                                if args.baseline_calibration else None)
+        self._controller = (ControllerConfig.load(args.controller_config)
+                            if args.controller_config else ControllerConfig.none())
+        self._baseline_controller = (ControllerConfig.load(args.baseline_controller_config)
+                                     if args.baseline_controller_config else None)
 
         self._stop_event = threading.Event()
         self._q_mocap = queue.Queue(maxsize=QUEUE_MAXSIZE)
@@ -217,21 +221,20 @@ class Orchestrator:
                             "extended" if args.extended else "default")
                 self._run_open_loop(args.open_loop_fs, args.open_loop_duration)
             elif args.ab:
-                base_calib = self._baseline_calib
-                base_ff = base_calib is not None
+                base_ctrl = self._baseline_controller
                 logger.info("A/B 对照：段0 baseline(%s) + 段1 前馈",
-                            "u_ff=0" if base_calib is None else "上一轮优化参数")
-                self._run_control_loop(args.duration, feedforward=base_ff,
-                                       segment_id=0, calib=base_calib or self._calib)
+                            "u_ff=0" if base_ctrl is None else "上一轮优化参数")
+                self._run_control_loop(args.duration, segment_id=0,
+                                       controller=base_ctrl or ControllerConfig.none())
                 self._bus.send_pair(0, 0)
                 time.sleep(2.0)  # 段间回中位静置
-                self._run_control_loop(args.duration, feedforward=True,
-                                       segment_id=1, calib=self._calib)
+                self._run_control_loop(args.duration, segment_id=1,
+                                       controller=self._controller)
             else:
                 mode = "mock" if args.mock else ("dry-run" if args.dry_run else f"串口 {args.servo_port}")
                 logger.info("闭环采集启动（%dHz），模式=%s，时长 %.0fs",
                             LOOP_HZ, mode, args.duration)
-                self._run_control_loop(args.duration, feedforward=args.feedforward)
+                self._run_control_loop(args.duration)
 
             # 8. 收尾：回中位
             logger.info("收尾：回中位 (offset=0, offset=0)")
@@ -306,8 +309,8 @@ class Orchestrator:
         except queue.Full:
             self._dropped["mocap"] += 1
 
-    def _run_control_loop(self, duration_s: float, feedforward: bool = False,
-                          segment_id: int | None = None, calib=None) -> None:
+    def _run_control_loop(self, duration_s: float, segment_id: int | None = None,
+                          controller=None) -> None:
         pid_fb = PIDController(kp=KP, ki=KI, kd=KD, limit=LIMIT,
                                deadband=DEADBAND, alpha=ALPHA)
         pid_lr = PIDController(kp=KP, ki=KI, kd=KD, limit=LIMIT,
@@ -330,15 +333,15 @@ class Orchestrator:
                 time.sleep(dt)
                 continue
 
-            c = calib or self._calib
-            curr_fb, curr_lr = c.map_pose(pose.roll, pose.pitch)
+            curr_fb, curr_lr = self._calib.map_pose(pose.roll, pose.pitch)
 
             pid_fb.target = t_fb
             pid_lr.target = t_lr
             out_fb = int(pid_fb.calculate(curr_fb))
             out_lr = int(pid_lr.calculate(curr_lr))
-            if feedforward:
-                ff_fb, ff_lr = c.feedforward(t_fb, t_lr)
+            ctrl = controller if controller is not None else self._controller
+            if ctrl.has_feedforward():
+                ff_fb, ff_lr = ctrl.feedforward(t_fb, t_lr)
                 out_fb = int(ff_fb + out_fb)
                 out_lr = int(ff_lr + out_lr)
             self._bus.send_pair(out_fb, out_lr)

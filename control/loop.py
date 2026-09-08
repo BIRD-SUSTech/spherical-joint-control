@@ -26,6 +26,7 @@ from datetime import datetime
 from pathlib import Path
 
 from control.calibration import Calibration
+from control.controller_config import ControllerConfig
 from control.pid import PIDController
 from hardware.mocap import MockMocap, MocapReader
 from hardware.servo import MockServoBus, ServoBus
@@ -54,7 +55,8 @@ def parse_args() -> argparse.Namespace:
     p.add_argument("--ip", default="10.1.1.198", help="动捕服务器 IP")
     p.add_argument("--servo-port", default=None, help="舵机串口（真实模式必填）")
     p.add_argument("--calibration", default=None, help="标定 JSON（缺省用默认映射）")
-    p.add_argument("--feedforward", action="store_true", help="加方向分段增益前馈（u_ff+u_fb）")
+    p.add_argument("--controller-config", default=None,
+                   help="控制器参数 JSON（前馈增益等；缺省=无前馈 u_ff=0）")
     p.add_argument("--rb", type=int, default=0, help="动捕刚体索引")
     p.add_argument("--no-csv", action="store_true", help="不写闭环 CSV")
     return p.parse_args()
@@ -97,6 +99,8 @@ def main() -> int:
     args = parse_args()
     traj = make_traj(args)
     calib = Calibration.load(args.calibration) if args.calibration else Calibration.default()
+    controller = (ControllerConfig.load(args.controller_config)
+                  if args.controller_config else ControllerConfig.none())
 
     # 动捕（仅动捕）
     mocap = MockMocap() if args.mock else MocapReader(args.ip, args.rb)
@@ -169,8 +173,8 @@ def main() -> int:
             out_fb = pid_fb.calculate(curr_fb)
             out_lr = pid_lr.calculate(curr_lr)
 
-            if args.feedforward:
-                ff_fb, ff_lr = calib.feedforward(t_fb, t_lr)
+            if controller.has_feedforward():
+                ff_fb, ff_lr = controller.feedforward(t_fb, t_lr)
                 out_fb = ff_fb + out_fb
                 out_lr = ff_lr + out_lr
 

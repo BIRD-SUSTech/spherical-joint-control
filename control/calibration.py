@@ -1,7 +1,9 @@
 """标定配置加载与姿态映射（替代 FLIP 硬编码，设计文档 §7.3 收口）。
 
+职责：仅"认识系统"的结果——符号映射 + 基础增益（随硬件平台，相对固定）。
+前馈增益调度等控制器参数在 `control/controller_config.py`（独立配置，可迭代）。
+
 默认标定 = M1/M2 实机初步确认的映射（前后←roll 正号，左右←pitch 正号）。
-标定后加载 JSON（control.calibrate 产出）覆盖默认。
 """
 
 from __future__ import annotations
@@ -18,20 +20,11 @@ class Calibration:
     front_back_sign: int = 1            # +1 | -1
     left_right_sign: int = 1            # +1 | -1
     gain_deg_per_offset: dict = None    # {"front_back": g, "left_right": g}
-    direction_gains: dict = None        # {"fb": {"pos","neg"}, "lr": {"pos","neg"}}
 
     def __post_init__(self):
         if self.gain_deg_per_offset is None:
             # 缺省 = rig1 的 M4 实测 ±5° 有效增益（单一事实源，见 calibrations/rig1.json）
             self.gain_deg_per_offset = {"front_back": 0.057, "left_right": 0.059}
-        if self.direction_gains is None:
-            # 缺省 = 对称增益（方向不分段），加载 rig1.json 后会被覆盖
-            g_fb = self.gain_deg_per_offset["front_back"]
-            g_lr = self.gain_deg_per_offset["left_right"]
-            self.direction_gains = {
-                "fb": {"pos": g_fb, "neg": g_fb},
-                "lr": {"pos": g_lr, "neg": g_lr},
-            }
 
     @classmethod
     def default(cls) -> "Calibration":
@@ -46,7 +39,6 @@ class Calibration:
             front_back_sign=data.get("front_back_sign", 1),
             left_right_sign=data.get("left_right_sign", 1),
             gain_deg_per_offset=data.get("gain_deg_per_offset"),
-            direction_gains=data.get("direction_gains"),
         )
 
     def map_pose(self, roll: float, pitch: float) -> tuple[float, float]:
@@ -54,13 +46,3 @@ class Calibration:
         fb = (roll if self.front_back_euler == "roll" else pitch) * self.front_back_sign
         lr = (pitch if self.left_right_euler == "pitch" else roll) * self.left_right_sign
         return fb, lr
-
-    def feedforward(self, q_d_fb: float, q_d_lr: float) -> tuple[float, float]:
-        """前馈反解：目标关节角（度）→ 差分 offset（§8.2 方向分段增益）。
-
-        前后用 fb 增益（按目标方向选 pos/neg），左右用 lr 增益。
-        """
-        g = self.direction_gains
-        u_fb = q_d_fb / (g["fb"]["pos"] if q_d_fb >= 0 else g["fb"]["neg"])
-        u_lr = q_d_lr / (g["lr"]["pos"] if q_d_lr >= 0 else g["lr"]["neg"])
-        return u_fb, u_lr
