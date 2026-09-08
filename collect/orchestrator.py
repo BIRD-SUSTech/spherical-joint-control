@@ -77,6 +77,8 @@ def parse_args() -> argparse.Namespace:
     p.add_argument("--ab", action="store_true", help="自动 A/B：同轨迹跑 baseline + 前馈两段")
     p.add_argument("--baseline-controller-config", default=None,
                    help="A/B baseline 段的控制器参数 JSON（缺省=u_ff=0；可传上一轮优化参数）")
+    p.add_argument("--inter-segment-settle", type=float, default=5.0,
+                   help="A/B 段间回正时长 s（默认 5，持续发 0 让球杆回到中立平衡态）")
     p.add_argument("--rb", type=int, default=0, help="动捕刚体索引")
     p.add_argument("--no-imu", action="store_true", help="不采集 IMU")
     p.add_argument("--no-force", action="store_true", help="不采集力传感器")
@@ -226,8 +228,7 @@ class Orchestrator:
                             "u_ff=0" if base_ctrl is None else "上一轮优化参数")
                 self._run_control_loop(args.duration, segment_id=0,
                                        controller=base_ctrl or ControllerConfig.none())
-                self._bus.send_pair(0, 0)
-                time.sleep(2.0)  # 段间回中位静置
+                self._settle_neutral(args.inter_segment_settle)  # 段间回正
                 self._run_control_loop(args.duration, segment_id=1,
                                        controller=self._controller)
             else:
@@ -308,6 +309,18 @@ class Orchestrator:
             self._q_mocap.put_nowait(frame)
         except queue.Full:
             self._dropped["mocap"] += 1
+
+    def _settle_neutral(self, settle_s: float) -> None:
+        """回中位并保持 settle_s 秒（持续发 0），让球杆稳定到 offset=0 平衡态。
+
+        A/B 两段从相同的中立状态出发：段间持续发 offset=0（保持张紧中立位），
+        球杆回到该指令对应的平衡态，两段起点一致。
+        """
+        logger.info("段间回正 %.1fs（持续发 offset=0）", settle_s)
+        t0 = time.perf_counter()
+        while time.perf_counter() - t0 < settle_s:
+            self._bus.send_pair(0, 0)
+            time.sleep(0.05)
 
     def _run_control_loop(self, duration_s: float, segment_id: int | None = None,
                           controller=None) -> None:

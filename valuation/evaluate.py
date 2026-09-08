@@ -97,27 +97,64 @@ def _plot_backend():
     return plt
 
 
+def _plot_axis(ax, t, tgt, cur, ylabel, color):
+    """单轴时间子图：target 虚线 vs current 实线。"""
+    ax.plot(t, tgt, "--", color=color, lw=1.2, label="target", alpha=0.9)
+    ax.plot(t, cur, color=color, lw=1.0, label="current", alpha=0.75)
+    ax.set_ylabel(ylabel)
+    ax.grid(alpha=0.3)
+    ax.legend(loc="upper right", fontsize=7)
+
+
+def _plot_compare_axis(ax, t0, tgt0, cur0, t1, cur1, ylabel, color):
+    """对比子图：target（同轨迹）+ 两段 current 叠加。"""
+    ax.plot(t0, tgt0, "--", color=color, lw=1.2, label="target", alpha=0.9)
+    ax.plot(t0, cur0, color="gray", lw=1.0, label="seg0", alpha=0.7)
+    ax.plot(t1, cur1, color=color, lw=1.2, label="seg1", alpha=0.85)
+    ax.set_ylabel(ylabel)
+    ax.grid(alpha=0.3)
+    ax.legend(loc="upper right", fontsize=7)
+
+
 def plot_time_series(servo_csv: Path, segment: int | None = None, out: Path | None = None,
                      label: str = "") -> Path:
-    """每个 segment 一个子图（时间轴各自从 0 起），fb/lr × target/current 四线。"""
+    """时间图：A/B 两段时 6 子图（段0 fb/lr + 段1 fb/lr + fb对比 + lr对比）；
+    否则每段一个子图（fb/lr 四线）。"""
     plt = _plot_backend()
     segs = _segments(servo_csv) if segment is None else [segment]
-    fig, axes = plt.subplots(len(segs), 1, figsize=(11, 2.6 * max(len(segs), 1)),
-                             sharex=False, squeeze=False)
-    axes = axes[:, 0]
-    for ax, seg in zip(axes, segs):
-        t, tf, tl, cf, cl = load_trajectory(servo_csv, seg)
-        t = t - t[0]  # 每段时间轴从 0 起
-        ax.plot(t, tf, "--", color="blue", lw=1.2, label="fb target", alpha=0.9)
-        ax.plot(t, cf, color="blue", lw=1.0, label="fb current", alpha=0.75)
-        ax.plot(t, tl, "--", color="red", lw=1.2, label="lr target", alpha=0.9)
-        ax.plot(t, cl, color="red", lw=1.0, label="lr current", alpha=0.75)
-        ax.set_ylabel(f"seg{seg} (deg)")
-        ax.grid(alpha=0.3)
-        ax.legend(loc="upper right", fontsize=7, ncol=2)
-    axes[-1].set_xlabel("t (s)")
-    fig.suptitle(f"Tracking per segment: {label}")
-    fig.tight_layout()
+
+    if len(segs) == 2:
+        s0, s1 = segs
+        t0, tf0, tl0, cf0, cl0 = load_trajectory(servo_csv, s0)
+        t1, tf1, tl1, cf1, cl1 = load_trajectory(servo_csv, s1)
+        t0 = t0 - t0[0]
+        t1 = t1 - t1[0]
+        fig, axes = plt.subplots(3, 2, figsize=(13, 10))
+        _plot_axis(axes[0, 0], t0, tf0, cf0, f"seg{s0} fb (deg)", "blue")
+        _plot_axis(axes[0, 1], t0, tl0, cl0, f"seg{s0} lr (deg)", "red")
+        _plot_axis(axes[1, 0], t1, tf1, cf1, f"seg{s1} fb (deg)", "blue")
+        _plot_axis(axes[1, 1], t1, tl1, cl1, f"seg{s1} lr (deg)", "red")
+        _plot_compare_axis(axes[2, 0], t0, tf0, cf0, t1, cf1, "fb compare (deg)", "blue")
+        _plot_compare_axis(axes[2, 1], t0, tl0, cl0, t1, cl1, "lr compare (deg)", "red")
+        axes[2, 0].set_xlabel("t (s)")
+        axes[2, 1].set_xlabel("t (s)")
+        fig.suptitle(f"A/B 6 子图: {label}")
+        fig.tight_layout()
+    else:
+        fig, axes = plt.subplots(len(segs), 1, figsize=(11, 2.6 * max(len(segs), 1)),
+                                 sharex=False, squeeze=False)
+        axes = axes[:, 0]
+        for ax, seg in zip(axes, segs):
+            t, tf, tl, cf, cl = load_trajectory(servo_csv, seg)
+            t = t - t[0]
+            _plot_axis(ax, t, tf, cf, f"seg{seg} fb (deg)", "blue")
+            ax.plot(t, tl, "--", color="red", lw=1.2, label="lr target", alpha=0.9)
+            ax.plot(t, cl, color="red", lw=1.0, label="lr current", alpha=0.75)
+            ax.grid(alpha=0.3)
+            ax.legend(loc="upper right", fontsize=7, ncol=2)
+        axes[-1].set_xlabel("t (s)")
+        fig.suptitle(f"Tracking per segment: {label}")
+        fig.tight_layout()
     png = out or (servo_csv.parent / "track_time.png")
     fig.savefig(png, dpi=110)
     plt.close(fig)
@@ -229,8 +266,9 @@ def run_all(servo_csv: Path) -> Path:
         json.dumps(metrics, indent=2, ensure_ascii=False), encoding="utf-8")
 
     plot_time_series(servo_csv, out=out_dir / "track_time.png")
-    plot_trajectory(servo_csv, out=out_dir / "track_top.png")
-    animate_trajectory(servo_csv, gif=out_dir / "track_anim.gif")
+    for s in _segments(servo_csv):
+        plot_trajectory(servo_csv, segment=s, out=out_dir / f"track_top_seg{s}.png", label=f"seg{s}")
+        animate_trajectory(servo_csv, segment=s, gif=out_dir / f"track_anim_seg{s}.gif", label=f"seg{s}")
     return out_dir
 
 
