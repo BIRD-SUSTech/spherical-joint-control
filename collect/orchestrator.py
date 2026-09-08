@@ -40,6 +40,7 @@ from collect.session import SessionManager
 from collect.writer import CsvWriter
 from control.calibration import Calibration
 from control.controller_config import ControllerConfig
+from control.trajectory import make_traj
 from control.pid import PIDController
 from excite.guardian import Guardian
 from excite.signals import default_segments, extended_segments, sample_segment
@@ -68,6 +69,14 @@ def parse_args() -> argparse.Namespace:
                    help="恒定目标（前后°, 左右°）")
     p.add_argument("--circle", nargs=2, type=float, metavar=("AMP_DEG", "PERIOD_S"),
                    help="圆形轨迹（振幅°, 周期 s）")
+    p.add_argument("--lissajous", nargs=4, type=float,
+                   metavar=("AMP_FB", "AMP_LR", "F1", "F2"), help="Lissajous 双频 2D")
+    p.add_argument("--eight", nargs=2, type=float, metavar=("AMP", "PERIOD_S"),
+                   help="8 字形（1:2 频率比，换向频繁）")
+    p.add_argument("--variable-circle", nargs=2, type=float, metavar=("AMP", "PERIOD_S"),
+                   help="变速圆（快慢交替）")
+    p.add_argument("--waypoints", nargs="+", type=float, metavar="FB LR DUR",
+                   help="点到点（fb lr dur 循环，多组）")
     p.add_argument("--duration", type=float, default=30.0, help="运行时长 s（默认 30）")
     p.add_argument("--ip", default="10.1.1.198", help="动捕服务器 IP")
     p.add_argument("--servo-port", default=None, help="舵机串口（真实模式必填）")
@@ -93,31 +102,7 @@ def parse_args() -> argparse.Namespace:
     return p.parse_args()
 
 
-RAMP_IN_S = 2.0  # 缓启动时长（M2 实机：直发阶跃超调 ~72%）
 
-
-def make_traj(args: argparse.Namespace):
-    def ramp(t):
-        return 1.0 if t >= RAMP_IN_S else (t / RAMP_IN_S)
-
-    if args.circle:
-        amp, period = args.circle
-
-        def traj(t):
-            r = ramp(t)
-            return (amp * math.cos(2 * math.pi * t / period) * r,
-                    amp * math.sin(2 * math.pi * t / period) * r)
-    elif args.hold:
-        fb0, lr0 = args.hold
-
-        def traj(t):
-            r = ramp(t)
-            return (fb0 * r, lr0 * r)
-    else:
-
-        def traj(t):
-            return (0.0, 0.0)
-    return traj
 
 
 class Orchestrator:
