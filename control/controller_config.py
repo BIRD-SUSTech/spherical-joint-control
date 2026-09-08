@@ -22,7 +22,13 @@ from pathlib import Path
 class ControllerConfig:
     direction_gains: dict | None = None   # {"fb": {"pos","neg"}, "lr": {"pos","neg"}}
     gain_poly: dict | None = None         # {"fb": [b0,b1,b2,b3], "lr": [...]} 逆映射 g(q)
+    slew_limit: float | None = None       # u_ff 每拍变化上限（offset/拍），None=不限
     # 未来扩展字段在此追加，load 时读取对应 key
+
+    _last_uff: tuple = field(default=None, init=False, repr=False)  # 上次前馈输出（slew 用）
+
+    def __post_init__(self):
+        self._last_uff = None
 
     @classmethod
     def none(cls) -> "ControllerConfig":
@@ -35,6 +41,7 @@ class ControllerConfig:
         return cls(
             direction_gains=data.get("direction_gains"),
             gain_poly=data.get("gain_poly"),
+            slew_limit=data.get("slew_limit"),
         )
 
     def has_feedforward(self) -> bool:
@@ -42,7 +49,7 @@ class ControllerConfig:
         return self.direction_gains is not None or self.gain_poly is not None
 
     def feedforward(self, q_d_fb: float, q_d_lr: float) -> tuple[float, float]:
-        """前馈反解：目标关节角（度）→ 差分 offset。
+        """前馈反解：目标关节角（度）→ 差分 offset（含 slew 速率整形）。
 
         优先参数化逆映射 gain_poly（u_ff = g(q_d)，含 bias 补偿）；
         否则方向分段 direction_gains；都没有则返回 (0,0)。
@@ -50,15 +57,30 @@ class ControllerConfig:
         if self.gain_poly is not None:
             u_fb = _poly(self.gain_poly["fb"], q_d_fb)
             u_lr = _poly(self.gain_poly["lr"], q_d_lr)
-            return u_fb, u_lr
-        if self.direction_gains is not None:
+        elif self.direction_gains is not None:
             g = self.direction_gains
             u_fb = q_d_fb / (g["fb"]["pos"] if q_d_fb >= 0 else g["fb"]["neg"])
             u_lr = q_d_lr / (g["lr"]["pos"] if q_d_lr >= 0 else g["lr"]["neg"])
-            return u_fb, u_lr
-        return 0.0, 0.0
+        else:
+            u_fb = u_lr = 0.0
+
+        # slew 速率整形：限制 u_ff 每拍变化量，防目标突变时前馈跳变
+        if self.slew_limit is not None:
+            if self._last_uff is not None:
+                u_fb = _slew(self._last_uff[0], u_fb, self.slew_limit)
+                u_lr = _slew(self._last_uff[1], u_lr, self.slew_limit)
+        self._last_uff = (u_fb, u_lr)
+        return u_fb, u_lr
 
 
 def _poly(coeffs, x):
     """多项式求值 u = b0 + b1·x + b2·x² + ..."""
     return sum(c * x ** k for k, c in enumerate(coeffs))
+
+
+def _slew(prev: float, cur: float, limit: float) -> float:
+    """斜率限制：每拍变化量不超过 limit。"""
+    d = cur - prev
+    if abs(d) > limit:
+        return prev + limit * (1 if d > 0 else -1)
+    return cur

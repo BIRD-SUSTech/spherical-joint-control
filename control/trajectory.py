@@ -68,12 +68,21 @@ def make_traj(args):
 
     elif args.waypoints:
         wps = _parse_waypoints(args.waypoints)
+        # 累计段起始时间（段间 RAMP_IN_S 平滑过渡，之后驻留）
+        starts = [0.0]
+        for _, _, d in wps:
+            starts.append(starts[-1] + d)
 
         def traj(t):
-            for fb, lr, dur in wps:
-                if t < dur:
+            for i, (fb, lr, _) in enumerate(wps):
+                if t < starts[i + 1]:
+                    t_local = t - starts[i]
+                    if t_local < RAMP_IN_S:
+                        prev = wps[i - 1] if i > 0 else (0.0, 0.0, 0.0)
+                        r = t_local / RAMP_IN_S
+                        return (prev[0] + (fb - prev[0]) * r,
+                                prev[1] + (lr - prev[1]) * r)
                     return (fb, lr)
-                t -= dur
             return (wps[-1][0], wps[-1][1])
 
     else:
