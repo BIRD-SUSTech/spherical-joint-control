@@ -6,7 +6,7 @@
 
 前馈项接口（可扩展，新增前馈项时在此追加字段并在 load 里读取）：
     - direction_gains：方向分段增益（级 1，已实现）
-    - amplitude_gains：幅值增益调度（级 1.5，预留）
+    - gain_poly：参数化逆映射 g(q) 系数（级 1.5，已实现）
     - hysteresis：迟滞补偿（级 2，预留）
     - friction：摩擦补偿（级 3，预留）
 """
@@ -21,6 +21,7 @@ from pathlib import Path
 @dataclass
 class ControllerConfig:
     direction_gains: dict | None = None   # {"fb": {"pos","neg"}, "lr": {"pos","neg"}}
+    gain_poly: dict | None = None         # {"fb": [b0,b1,b2,b3], "lr": [...]} 逆映射 g(q)
     # 未来扩展字段在此追加，load 时读取对应 key
 
     @classmethod
@@ -33,20 +34,31 @@ class ControllerConfig:
         data = json.loads(Path(path).read_text(encoding="utf-8"))
         return cls(
             direction_gains=data.get("direction_gains"),
+            gain_poly=data.get("gain_poly"),
         )
 
     def has_feedforward(self) -> bool:
         """是否启用前馈。"""
-        return self.direction_gains is not None
+        return self.direction_gains is not None or self.gain_poly is not None
 
     def feedforward(self, q_d_fb: float, q_d_lr: float) -> tuple[float, float]:
         """前馈反解：目标关节角（度）→ 差分 offset。
 
-        无 direction_gains 时返回 (0,0)（等价 u_ff=0）。
+        优先参数化逆映射 gain_poly（u_ff = g(q_d)，含 bias 补偿）；
+        否则方向分段 direction_gains；都没有则返回 (0,0)。
         """
-        if self.direction_gains is None:
-            return 0.0, 0.0
-        g = self.direction_gains
-        u_fb = q_d_fb / (g["fb"]["pos"] if q_d_fb >= 0 else g["fb"]["neg"])
-        u_lr = q_d_lr / (g["lr"]["pos"] if q_d_lr >= 0 else g["lr"]["neg"])
-        return u_fb, u_lr
+        if self.gain_poly is not None:
+            u_fb = _poly(self.gain_poly["fb"], q_d_fb)
+            u_lr = _poly(self.gain_poly["lr"], q_d_lr)
+            return u_fb, u_lr
+        if self.direction_gains is not None:
+            g = self.direction_gains
+            u_fb = q_d_fb / (g["fb"]["pos"] if q_d_fb >= 0 else g["fb"]["neg"])
+            u_lr = q_d_lr / (g["lr"]["pos"] if q_d_lr >= 0 else g["lr"]["neg"])
+            return u_fb, u_lr
+        return 0.0, 0.0
+
+
+def _poly(coeffs, x):
+    """多项式求值 u = b0 + b1·x + b2·x² + ..."""
+    return sum(c * x ** k for k, c in enumerate(coeffs))

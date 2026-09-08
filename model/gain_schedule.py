@@ -66,3 +66,23 @@ def poly_deriv(coeffs: np.ndarray, with_bias: bool = True) -> np.ndarray:
     """
     c = coeffs[1:] if with_bias else coeffs
     return np.array([k * c[k - 1] for k in range(1, len(c) + 1)])
+
+
+def fit_inverse_poly(q: np.ndarray, u: np.ndarray, degree: int = 3) -> np.ndarray:
+    """拟合逆映射 u = g(q) = b0 + b1·q + b2·q² + ... + b_degree·q^degree。
+
+    前馈 u_ff = g(q_d) 一步到位（b0 天然含 bias 补偿，即"到达 0° 所需 offset"）。
+    """
+    cols = [np.ones_like(q)] + [q ** k for k in range(1, degree + 1)]
+    Q = np.column_stack(cols)
+    coeffs, *_ = np.linalg.lstsq(Q, u, rcond=None)
+    return coeffs
+
+
+def eval_poly(coeffs: np.ndarray, x) -> np.ndarray:
+    """多项式求值（支持标量或数组）。"""
+    x = np.asarray(x, dtype=float)
+    out = np.zeros_like(x)
+    for k, c in enumerate(coeffs):
+        out = out + c * x ** k
+    return out
