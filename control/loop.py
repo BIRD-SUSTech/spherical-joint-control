@@ -66,6 +66,8 @@ def parse_args() -> argparse.Namespace:
     p.add_argument("--calibration", default=None, help="标定 JSON（缺省用默认映射）")
     p.add_argument("--controller-config", default=None,
                    help="控制器参数 JSON（前馈增益等；缺省=无前馈 u_ff=0）")
+    p.add_argument("--startup-fade", type=float, default=1.0,
+                   help="前馈启动渐入时长 s（0=不渐入；启动后该秒内按比例放行前馈）")
     p.add_argument("--rb", type=int, default=0, help="动捕刚体索引")
     p.add_argument("--no-csv", action="store_true", help="不写闭环 CSV")
     return p.parse_args()
@@ -159,8 +161,9 @@ def main() -> int:
 
             if controller.has_feedforward():
                 ff_fb, ff_lr = controller.feedforward(t_fb, t_lr, qdot_fb, qdot_lr)
-                out_fb = ff_fb + out_fb
-                out_lr = ff_lr + out_lr
+                fade = min(1.0, t / args.startup_fade) if args.startup_fade > 0 else 1.0
+                out_fb = fade * ff_fb + out_fb
+                out_lr = fade * ff_lr + out_lr
 
             bus.send_pair(int(out_fb), int(out_lr))
 

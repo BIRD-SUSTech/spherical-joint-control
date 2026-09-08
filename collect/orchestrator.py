@@ -88,6 +88,8 @@ def parse_args() -> argparse.Namespace:
                    help="A/B baseline 段的控制器参数 JSON（缺省=u_ff=0；可传上一轮优化参数）")
     p.add_argument("--inter-segment-settle", type=float, default=5.0,
                    help="A/B 段间回正时长 s（默认 5，持续发 0 让球杆回到中立平衡态）")
+    p.add_argument("--startup-fade", type=float, default=1.0,
+                   help="前馈启动渐入时长 s（0=不渐入；启动后该秒内按比例放行前馈）")
     p.add_argument("--rb", type=int, default=0, help="动捕刚体索引")
     p.add_argument("--no-imu", action="store_true", help="不采集 IMU")
     p.add_argument("--no-force", action="store_true", help="不采集力传感器")
@@ -345,8 +347,9 @@ class Orchestrator:
             ctrl = controller if controller is not None else self._controller
             if ctrl.has_feedforward():
                 ff_fb, ff_lr = ctrl.feedforward(t_fb, t_lr, qdot_fb, qdot_lr)
-                out_fb = int(ff_fb + out_fb)
-                out_lr = int(ff_lr + out_lr)
+                fade = min(1.0, t / self._args.startup_fade) if self._args.startup_fade > 0 else 1.0
+                out_fb = int(fade * ff_fb + out_fb)
+                out_lr = int(fade * ff_lr + out_lr)
             self._bus.send_pair(out_fb, out_lr)
 
             state = ServoState(
