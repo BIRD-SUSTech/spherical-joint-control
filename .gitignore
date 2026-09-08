@@ -32,6 +32,7 @@ feedforward/outputs/
 *.log
 control/logs/
 collect/logs/
+valuation/results/
 
 # === IDE / 编辑器 ===
 .vscode/

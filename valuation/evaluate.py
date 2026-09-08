@@ -1,15 +1,16 @@
-"""闭环跟踪误差评估与可视化（新 schema）。
+"""独立评测：误差评估 + 可视化 + 结果落盘。
 
 读 servo_data.csv（target 与 current 同行，M2 schema），按 segment_id 分段：
-评估（MAE/RMSE/max）+ 可视化（两轴时间图 + 俯视角轨迹 + 动图）。
+评估（MAE/RMSE/max）+ 可视化（两轴时间图 + 俯视角轨迹 + 动图 GIF）。
 
 用法：
-    python -m collect.valuation <session_dir>                     # 评估所有段
-    python -m collect.valuation <session_dir> --segment 0         # 只评段 0
-    python -m collect.valuation <session_dir> --ab                # A/B 段 0 vs 段 1 对比
-    python -m collect.valuation <session_dir> --plot time         # 两轴时间图（存 PNG）
-    python -m collect.valuation <session_dir> --plot top          # 俯视角轨迹（存 PNG）
-    python -m collect.valuation <session_dir> --plot animate --gif out.gif
+    python -m valuation.evaluate <session> --all          # 全部评测（metric + 图 + gif）
+    python -m valuation.evaluate <session> --ab           # A/B 分段对比
+    python -m valuation.evaluate <session> --plot time    # 单项图
+    python -m valuation.evaluate <session> --plot animate --gif out.gif
+
+结果输出（--all 时）到 valuation/results/<session名>/：
+    metrics.json / track_time.png / track_top.png / track_anim.gif
 """
 
 from __future__ import annotations
@@ -21,6 +22,8 @@ import sys
 from pathlib import Path
 
 import numpy as np
+
+RESULT_ROOT = Path(__file__).resolve().parent / "results"
 
 
 def _stats(err: np.ndarray) -> dict:
@@ -78,6 +81,11 @@ def _resolve_csv(path: Path) -> Path:
     return path / "servo_data.csv" if path.is_dir() else path
 
 
+def _session_name(servo_csv: Path) -> str:
+    """从会话目录/CSV 路径提取会话名。"""
+    return servo_csv.parent.name if servo_csv.name == "servo_data.csv" else servo_csv.stem
+
+
 # ---------------------------------------------------------------------------
 # 可视化
 # ---------------------------------------------------------------------------
@@ -89,18 +97,12 @@ def _plot_backend():
     return plt
 
 
-def _out_dir(servo_csv: Path) -> Path:
-    return servo_csv.parent
-
-
 def plot_time_series(servo_csv: Path, segment: int | None = None, out: Path | None = None,
                      label: str = "") -> Path:
-    """两轴随时间：target（虚线）vs current（实线），存 PNG。"""
     plt = _plot_backend()
     t, tf, tl, cf, cl = load_trajectory(servo_csv, segment)
     fig, axes = plt.subplots(2, 1, figsize=(11, 7), sharex=True)
-    for ax, name, tgt, cur in zip(axes, ("前后(fb)", "左右(lr)"),
-                                  (tf, tl), (cf, cl)):
+    for ax, name, tgt, cur in zip(axes, ("fb", "lr"), (tf, tl), (cf, cl)):
         ax.plot(t, tgt, "--", lw=1.2, label="target", alpha=0.9)
         ax.plot(t, cur, lw=1.0, label="current", alpha=0.8)
         ax.set_ylabel(f"{name} (deg)")
@@ -109,7 +111,7 @@ def plot_time_series(servo_csv: Path, segment: int | None = None, out: Path | No
     axes[-1].set_xlabel("t (s)")
     fig.suptitle(f"Tracking: {label or 'segment ' + str(segment)}")
     fig.tight_layout()
-    png = out or (_out_dir(servo_csv) / "track_time.png")
+    png = out or (servo_csv.parent / "track_time.png")
     fig.savefig(png, dpi=110)
     plt.close(fig)
     return png
@@ -117,23 +119,22 @@ def plot_time_series(servo_csv: Path, segment: int | None = None, out: Path | No
 
 def plot_trajectory(servo_csv: Path, segment: int | None = None, out: Path | None = None,
                     label: str = "", ax_lim: float | None = None) -> Path:
-    """俯视角：fb-lr 平面 target vs current 轨迹，存 PNG。"""
     plt = _plot_backend()
     _, tf, tl, cf, cl = load_trajectory(servo_csv, segment)
     fig, ax = plt.subplots(figsize=(8, 8))
     ax.plot(tf, tl, "--", lw=1.5, color="blue", label="target", alpha=0.9)
     ax.plot(cf, cl, lw=1.2, color="orange", label="current", alpha=0.8)
     ax.scatter([tf[0]], [tl[0]], color="blue", s=60, label="start", zorder=5)
-    ax.set_xlabel("前后 fb (deg)")
-    ax.set_ylabel("左右 lr (deg)")
-    ax.set_title(f"俯视角轨迹: {label or 'segment ' + str(segment)}")
+    ax.set_xlabel("front-back (deg)")
+    ax.set_ylabel("left-right (deg)")
+    ax.set_title(f"Top-view: {label or 'segment ' + str(segment)}")
     ax.grid(alpha=0.3)
     ax.legend(loc="upper right")
     if ax_lim is not None:
         ax.set_xlim(-ax_lim, ax_lim)
         ax.set_ylim(-ax_lim, ax_lim)
     fig.tight_layout()
-    png = out or (_out_dir(servo_csv) / "track_top.png")
+    png = out or (servo_csv.parent / "track_top.png")
     fig.savefig(png, dpi=110)
     plt.close(fig)
     return png
@@ -141,7 +142,6 @@ def plot_trajectory(servo_csv: Path, segment: int | None = None, out: Path | Non
 
 def animate_trajectory(servo_csv: Path, segment: int | None = None,
                        gif: Path | None = None, label: str = "") -> Path:
-    """俯视角动图（fb-lr 平面），存 GIF。"""
     plt = _plot_backend()
     import matplotlib.animation as animation
 
@@ -164,9 +164,9 @@ def animate_trajectory(servo_csv: Path, segment: int | None = None,
     (head_exp,) = ax.plot([], [], "bo", markersize=7)
     (head_act,) = ax.plot([], [], "o", color="orange", markersize=7)
 
-    ax.set_xlabel("前后 fb (deg)")
-    ax.set_ylabel("左右 lr (deg)")
-    ax.set_title(f"俯视角动图: {label or 'segment ' + str(segment)}")
+    ax.set_xlabel("front-back (deg)")
+    ax.set_ylabel("left-right (deg)")
+    ax.set_title(f"Top-view animation: {label or 'segment ' + str(segment)}")
     ax.grid(alpha=0.3)
     ax.legend(loc="upper right")
 
@@ -182,7 +182,7 @@ def animate_trajectory(servo_csv: Path, segment: int | None = None,
 
     ani = animation.FuncAnimation(fig, update, frames=range(0, len(x_exp), step),
                                   interval=20, blit=True, repeat=False)
-    gif_path = gif or (_out_dir(servo_csv) / "track_anim.gif")
+    gif_path = gif or (servo_csv.parent / "track_anim.gif")
     try:
         ani.save(gif_path, writer="pillow", fps=30)
     except Exception as e:  # noqa: BLE001
@@ -193,10 +193,41 @@ def animate_trajectory(servo_csv: Path, segment: int | None = None,
 
 
 # ---------------------------------------------------------------------------
-# A/B 对比
+# 全部评测 + 结果落盘
 # ---------------------------------------------------------------------------
 
-def _ab_compare(servo_csv: Path) -> None:
+def _build_metrics(servo_csv: Path) -> dict:
+    """构造指标 dict（含分段评估 + A/B 变化对比）。"""
+    segs = _segments(servo_csv)
+    metrics: dict = {"segments": {str(s): evaluate(servo_csv, s) for s in segs}}
+    if len(segs) >= 2:
+        r0 = metrics["segments"][str(segs[0])]
+        r1 = metrics["segments"][str(segs[-1])]
+        metrics["comparison"] = {}
+        for axis, label in (("front_back", "前后"), ("left_right", "左右")):
+            d_mae = (r1[axis]["mae"] - r0[axis]["mae"]) / r0[axis]["mae"] * 100
+            d_max = (r1[axis]["max_abs"] - r0[axis]["max_abs"]) / r0[axis]["max_abs"] * 100
+            metrics["comparison"][label] = {"mae_pct": round(d_mae, 2), "max_pct": round(d_max, 2)}
+    return metrics
+
+
+def run_all(servo_csv: Path) -> Path:
+    """一次全部评测 → valuation/results/<session名>/（metric + 图 + gif）。"""
+    session = _session_name(servo_csv)
+    out_dir = RESULT_ROOT / session
+    out_dir.mkdir(parents=True, exist_ok=True)
+
+    metrics = _build_metrics(servo_csv)
+    (out_dir / "metrics.json").write_text(
+        json.dumps(metrics, indent=2, ensure_ascii=False), encoding="utf-8")
+
+    plot_time_series(servo_csv, out=out_dir / "track_time.png")
+    plot_trajectory(servo_csv, out=out_dir / "track_top.png")
+    animate_trajectory(servo_csv, gif=out_dir / "track_anim.gif")
+    return out_dir
+
+
+def _print_ab(servo_csv: Path) -> None:
     segs = _segments(servo_csv)
     print("=== A/B 分段评估 ===")
     for s in segs:
@@ -205,13 +236,10 @@ def _ab_compare(servo_csv: Path) -> None:
         print(f"  segment {s}: fb MAE={fb['mae']:.4f} RMSE={fb['rmse']:.4f} max={fb['max_abs']:.4f}"
               f"  |  lr MAE={lr['mae']:.4f} RMSE={lr['rmse']:.4f} max={lr['max_abs']:.4f}")
     if len(segs) >= 2:
-        r0 = evaluate(servo_csv, segs[0])
-        r1 = evaluate(servo_csv, segs[-1])
-        print("\n--- 末段 vs 首段 变化（%）---")
-        for axis, label in (("front_back", "前后"), ("left_right", "左右")):
-            d_mae = (r1[axis]["mae"] - r0[axis]["mae"]) / r0[axis]["mae"] * 100
-            d_max = (r1[axis]["max_abs"] - r0[axis]["max_abs"]) / r0[axis]["max_abs"] * 100
-            print(f"  {label}: MAE {d_mae:+.1f}%  max {d_max:+.1f}%")
+        m = _build_metrics(servo_csv)["comparison"]
+        print("\n--- 末段 vs 首段 变化 ---")
+        for label, d in m.items():
+            print(f"  {label}: MAE {d['mae_pct']:+.1f}%  max {d['max_pct']:+.1f}%")
 
 
 # ---------------------------------------------------------------------------
@@ -219,14 +247,15 @@ def _ab_compare(servo_csv: Path) -> None:
 # ---------------------------------------------------------------------------
 
 def main() -> int:
-    ap = argparse.ArgumentParser(description="闭环跟踪误差评估 + 可视化")
+    ap = argparse.ArgumentParser(description="独立评测：误差评估 + 可视化 + 结果落盘")
     ap.add_argument("path", help="会话目录或 servo_data.csv")
+    ap.add_argument("--all", action="store_true", help="一次全部评测（metric+图+gif）")
     ap.add_argument("--segment", type=int, default=None, help="只评估/可视化指定段 id")
     ap.add_argument("--ab", action="store_true", help="A/B 分段对比（所有段）")
     ap.add_argument("--plot", choices=("time", "top", "animate"), default=None,
                     help="可视化：time=两轴时间图 top=俯视角 animate=动图")
     ap.add_argument("--gif", default=None, help="--plot animate 的 GIF 输出路径")
-    ap.add_argument("--out", default=None, help="PNG/GIF 输出路径（缺省会话目录）")
+    ap.add_argument("--out", default=None, help="PNG/GIF 输出路径")
     ap.add_argument("--json", action="store_true", help="评估结果输出 JSON")
     args = ap.parse_args()
 
@@ -235,8 +264,14 @@ def main() -> int:
         print(f"文件不存在: {csv_path}", file=sys.stderr)
         return 1
 
+    if args.all:
+        out_dir = run_all(csv_path)
+        print(f"全部评测完成，结果目录: {out_dir}")
+        _print_ab(csv_path)
+        return 0
+
     if args.ab:
-        _ab_compare(csv_path)
+        _print_ab(csv_path)
         return 0
 
     result = evaluate(csv_path, args.segment)
