@@ -1,43 +1,31 @@
-# 当前阶段命令清单：大角度闭环采集 → 收敛段拟合 v7 真版
+# 当前阶段命令清单：v7 真版 vs v6 A/B 验证
 # 更新日期：2026-09-08
-# 前置：conda activate spherical_joint；NAS 会话数据可回传 M*_verification/data/
+# 前置：conda activate spherical_joint；会话回传 M*_verification/data/
 
 # ============================================================
-# 一、大角度闭环 A/B 采集（实验平台执行）
-# 注意：前馈用 v7（开环覆盖大角度、不折叠），不要用 v6（+15~20° 会折叠）
+# 背景：v7 真版（收敛段 ±20° 拟合）已生成，需验证三点：
+#   1) circle15 启动前 2s 瞬态（M12 v7 开环版曾 +166%，真版 bias 变了，看是否缓解）
+#   2) circle20 大角度（v7 开环版已 -47%，真版应保持）
+#   3) waypoints ±20 的 lr（M12 lr +10.5%，真版 lr bias 修正到 +1.06，看是否改善）
+# 对比：seg0=v6（当前 merge 基线）/ seg1=v7 真版
 # ============================================================
 
-# circle 15°/8s
-python -m collect.orchestrator --ab --circle 15 8 --duration 60 --servo-port COM5 --force-port COM3 --calibration calibrations/rig1.json --controller-config configs/controller_v7.json --baseline-controller-config configs/controller_v3.json
+# circle 15°/8s（重点看启动前 2s）
+python -m collect.orchestrator --ab --circle 15 8 --duration 60 --servo-port COM5 --force-port COM3 --calibration calibrations/rig1.json --controller-config configs/controller_v7.json --baseline-controller-config configs/controller_v6.json
 
-# circle 20°/10s
-python -m collect.orchestrator --ab --circle 20 10 --duration 60 --servo-port COM5 --force-port COM3 --calibration calibrations/rig1.json --controller-config configs/controller_v7.json --baseline-controller-config configs/controller_v3.json
+# circle 20°/10s（大角度，应保持改善）
+python -m collect.orchestrator --ab --circle 20 10 --duration 60 --servo-port COM5 --force-port COM3 --calibration calibrations/rig1.json --controller-config configs/controller_v7.json --baseline-controller-config configs/controller_v6.json
 
-# waypoints ±15° 梯形驻留（采大角度稳态收敛段）
-python -m collect.orchestrator --ab --waypoints 15 0 5 -15 0 5 0 15 5 --duration 15 --servo-port COM5 --force-port COM3 --calibration calibrations/rig1.json --controller-config configs/controller_v7.json --baseline-controller-config configs/controller_v3.json
+# waypoints ±20°（重点看 lr）
+python -m collect.orchestrator --ab --waypoints 20 0 5 -20 0 5 0 20 5 --duration 15 --servo-port COM5 --force-port COM3 --calibration calibrations/rig1.json --controller-config configs/controller_v7.json --baseline-controller-config configs/controller_v6.json
 
-# waypoints ±20° 梯形驻留
-python -m collect.orchestrator --ab --waypoints 20 0 5 -20 0 5 0 20 5 --duration 15 --servo-port COM5 --force-port COM3 --calibration calibrations/rig1.json --controller-config configs/controller_v7.json --baseline-controller-config configs/controller_v3.json
-
-# 每条跑完立即评测（分段指标 + 可视化）
+# 每条跑完立即评测（全段 + 稳态双口径）
 python -m valuation.evaluate <session_dir> --all
 
 # ============================================================
-# 二、收敛段拟合 v7 真版（开发 PC，数据到 NAS 后执行）
-# 覆盖大角度 + bias 准（收敛段），替换当前的 v7 开环过渡版
+# 判据（每级只能持平或更好，否则回退）
 # ============================================================
-
-python -m model.fit_controller --converged-only --threshold 0.3 --session <M10闭环会话> <M11大角度闭环会话1> <M11大角度闭环会话2> --out configs/controller_v7.json --slew-limit 2.0
-
-# ============================================================
-# 三、分轴决策检查（拟合后必做）
-# ============================================================
-# 看 lr 的 bias：若偏离 v3 开环(0.15)很多 → lr 退回 v3，只 fb 用收敛段（分轴）
-# 若 lr 稳定 → 全量用收敛段
-
-# ============================================================
-# 四、A/B 验证判据
-# ============================================================
-# v7 真版 vs v6，重点看 ±15°/±20° 大角度：
-#   - 变速圆 +12° 的 +2° 外推残差应消失
-#   - 每级只能持平或更好，否则回退
+# 1) circle15：启动前 2s 峰值应 ≤ v6（若仍大 → 启动瞬态单独处理：u_ff 渐入/ramp 3s）
+# 2) circle20：MAE/max 应保持 v7 开环版的改善（-47%/-77% 量级）
+# 3) waypoints ±20 lr：应不再 +10.5%（真版 lr bias 已修正）
+# 4) 稳态口径（t>5s）为主，全段口径参考（启动瞬态会污染全段）
