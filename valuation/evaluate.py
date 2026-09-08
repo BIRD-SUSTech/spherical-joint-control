@@ -99,17 +99,24 @@ def _plot_backend():
 
 def plot_time_series(servo_csv: Path, segment: int | None = None, out: Path | None = None,
                      label: str = "") -> Path:
+    """每个 segment 一个子图（时间轴各自从 0 起），fb/lr × target/current 四线。"""
     plt = _plot_backend()
-    t, tf, tl, cf, cl = load_trajectory(servo_csv, segment)
-    fig, axes = plt.subplots(2, 1, figsize=(11, 7), sharex=True)
-    for ax, name, tgt, cur in zip(axes, ("fb", "lr"), (tf, tl), (cf, cl)):
-        ax.plot(t, tgt, "--", lw=1.2, label="target", alpha=0.9)
-        ax.plot(t, cur, lw=1.0, label="current", alpha=0.8)
-        ax.set_ylabel(f"{name} (deg)")
+    segs = _segments(servo_csv) if segment is None else [segment]
+    fig, axes = plt.subplots(len(segs), 1, figsize=(11, 2.6 * max(len(segs), 1)),
+                             sharex=False, squeeze=False)
+    axes = axes[:, 0]
+    for ax, seg in zip(axes, segs):
+        t, tf, tl, cf, cl = load_trajectory(servo_csv, seg)
+        t = t - t[0]  # 每段时间轴从 0 起
+        ax.plot(t, tf, "--", color="blue", lw=1.2, label="fb target", alpha=0.9)
+        ax.plot(t, cf, color="blue", lw=1.0, label="fb current", alpha=0.75)
+        ax.plot(t, tl, "--", color="red", lw=1.2, label="lr target", alpha=0.9)
+        ax.plot(t, cl, color="red", lw=1.0, label="lr current", alpha=0.75)
+        ax.set_ylabel(f"seg{seg} (deg)")
         ax.grid(alpha=0.3)
-        ax.legend(loc="upper right")
+        ax.legend(loc="upper right", fontsize=7, ncol=2)
     axes[-1].set_xlabel("t (s)")
-    fig.suptitle(f"Tracking: {label or 'segment ' + str(segment)}")
+    fig.suptitle(f"Tracking per segment: {label}")
     fig.tight_layout()
     png = out or (servo_csv.parent / "track_time.png")
     fig.savefig(png, dpi=110)
