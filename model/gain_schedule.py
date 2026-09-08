@@ -40,3 +40,29 @@ def feedforward(gains: dict, q_d: np.ndarray) -> np.ndarray:
         if abs(g) > 1e-9:
             u_ff[a] = d / g
     return u_ff
+
+
+def fit_static_poly(u: np.ndarray, q: np.ndarray, degree: int = 3,
+                    with_bias: bool = True) -> np.ndarray:
+    """拟合静态映射 h(u) = bias + a1·u + a2·u² + a3·u³ + ...
+
+    返回系数 [bias, a1, a2, ..., a_degree]（with_bias=False 时无 bias）。
+    用于参数化增益 G(u) = dh/du。
+    """
+    cols = []
+    if with_bias:
+        cols.append(np.ones_like(u))
+    for k in range(1, degree + 1):
+        cols.append(u ** k)
+    U = np.column_stack(cols)
+    coeffs, *_ = np.linalg.lstsq(U, q, rcond=None)
+    return coeffs
+
+
+def poly_deriv(coeffs: np.ndarray, with_bias: bool = True) -> np.ndarray:
+    """多项式求导系数：G(u) = dh/du 的系数。
+
+    coeffs=[bias,a1,a2,a3] → [a1, 2a2, 3a3]；with_bias=False 时 coeffs=[a1,a2,a3] → [a1,2a2,3a3]。
+    """
+    c = coeffs[1:] if with_bias else coeffs
+    return np.array([k * c[k - 1] for k in range(1, len(c) + 1)])
