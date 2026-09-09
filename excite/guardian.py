@@ -53,7 +53,7 @@ class Guardian:
                 if abs(fb) > self._limit_deg or abs(lr) > self._limit_deg:
                     logger.error("关节角超限 fb=%.1f° lr=%.1f°（限位 %.0f°），急停回中位",
                                  fb, lr, self._limit_deg)
-                    self._bus.send_pair(0, 0)
+                    self._bus.send_pair_tension(0, 0, 0, 0)  # 差分+共模同时回零
                     self._triggered = True
                     break
             time.sleep(POLL_S)

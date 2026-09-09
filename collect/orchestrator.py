@@ -355,7 +355,7 @@ class Orchestrator:
                 fade = min(1.0, t / self._args.startup_fade) if self._args.startup_fade > 0 else 1.0
                 out_fb = int(fade * ff_fb + out_fb)
                 out_lr = int(fade * ff_lr + out_lr)
-            self._bus.send_pair(out_fb, out_lr)
+            self._send_control(out_fb, out_lr, curr_fb, curr_lr)
 
             state = ServoState(
                 pc_timestamp_ns=time.perf_counter_ns(),
@@ -381,12 +381,29 @@ class Orchestrator:
             else:
                 next_t = time.perf_counter()  # 掉拍重新对齐
 
+    def _send_control(self, out_fb: int, out_lr: int, curr_fb: float, curr_lr: float) -> None:
+        """发差分 offset + 共模预紧（设计文档 §8.3.2，单帧原子发布）。
+
+        差分 u = (out_fb, out_lr) 是闭环跟踪量；共模 c = common_mode(curr) 是旁路预紧，
+        不经过 PID、不参与闭环。common_mode 在无 co_tension 时返回 (0,0)，故无副作用。
+        """
+        c_fb, c_lr = self._calib.common_mode(curr_fb, curr_lr)
+        self._bus.send_pair_tension(out_fb, out_lr, c_fb, c_lr)
+
     def _run_open_loop(self, fs: float, duration_s: float | None = None) -> None:
         """开环激励执行：逐段发 offset，每段一个 segment_id，guardian 触发即停。"""
         dt = 1.0 / fs
         t_start = time.perf_counter()
         segments = _pick_segments(self._args)
         gains = self._calib.gain_deg_per_offset
+        # 安全护栏：open-loop 用 deg→offset 换算，必须用实测增益。增益缺失（未跑 M3 标定）
+        # 时禁止开环——旧 rig 增益会被误当成新硬件增益，导致 offset 超调、可能触 guardian。
+        if not gains or "front_back" not in gains or "left_right" not in gains:
+            logger.error("标定缺少 gain_deg_per_offset，无法安全开环；请先跑 M3 标定"
+                         "（python -m control.calibrate --servo-port <端口> --out calibrations/rig2.json）")
+            return
+        logger.info("开环激励使用标定增益 fb=%.4f lr=%.4f（°/offset）",
+                    gains["front_back"], gains["left_right"])
         for seg_id, seg in enumerate(segments):
             if duration_s is not None and time.perf_counter() - t_start >= duration_s:
                 break
@@ -401,12 +418,11 @@ class Orchestrator:
                     return
                 fb_off = int(fb_seq[i])
                 lr_off = int(lr_seq[i])
-                self._bus.send_pair(fb_off, lr_off)
-
                 pose = self._mocap.get_pose()
                 curr_fb = curr_lr = 0.0
                 if pose is not None:
                     curr_fb, curr_lr = self._calib.map_pose(pose.roll, pose.pitch)
+                self._send_control(fb_off, lr_off, curr_fb, curr_lr)
 
                 state = ServoState(
                     pc_timestamp_ns=time.perf_counter_ns(),

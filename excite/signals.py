@@ -13,8 +13,8 @@ from __future__ import annotations
 
 import math
 
-GAIN_FB = 0.057    # °/offset（M4 开环实测 ±5° 有效增益，前后）
-GAIN_LR = 0.059    # °/offset（M4 开环实测 ±5° 有效增益，左右）
+GAIN_FB = 0.057    # ⚠️ rig1(旧硬件)遗留默认，仅无标定时占位；实机由 calibrations/*.json 覆盖
+GAIN_LR = 0.059    # ⚠️ 新硬件(rig2)舵机更强、真实增益更大，开环必须用 M3 实测增益，勿用此值
 
 
 def deg_to_offset(deg: float, axis: str, gain_fb: float = GAIN_FB, gain_lr: float = GAIN_LR) -> float:

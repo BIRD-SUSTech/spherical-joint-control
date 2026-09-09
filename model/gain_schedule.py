@@ -79,10 +79,66 @@ def fit_inverse_poly(q: np.ndarray, u: np.ndarray, degree: int = 3) -> np.ndarra
     return coeffs
 
 
+def inverse_is_monotonic(coeffs: np.ndarray, q_range: tuple[float, float],
+                         n: int = 200) -> tuple[bool, float]:
+    """检查逆映射 g(q) 在 [q_min, q_max] 内是否单调递增（g'(q) > 0）。
+
+    前馈逆映射必须单调：三阶/高阶多项式在工作区边缘可能折叠（v6 实测
+    g(+15°)>g(+20°)），折叠的 g(q) 局部不可逆、前馈比纯 PID 还差。
+    返回 (is_monotonic, min_deriv)。
+    """
+    q_min, q_max = q_range
+    qs = np.linspace(q_min, q_max, n)
+    dcoeffs = poly_deriv(coeffs, with_bias=True)
+    d = eval_poly(dcoeffs, qs)
+    return bool(np.all(d > 0)), float(d.min())
+
+
 def eval_poly(coeffs: np.ndarray, x) -> np.ndarray:
     """多项式求值（支持标量或数组）。"""
     x = np.asarray(x, dtype=float)
     out = np.zeros_like(x)
     for k, c in enumerate(coeffs):
         out = out + c * x ** k
+    return out
+
+
+# ---------------------------------------------------------------------------
+# 几何耦合解耦前馈（§8.3，数据驱动，加性交叉项）
+# ---------------------------------------------------------------------------
+#
+# 单轴逆映射 g(q_self) = u 只描述本轴稳态增益，无法表达"球杆绕一轴倾斜后，
+# 正交缆绳变松/变紧改变另一轴平衡 offset"的几何耦合。实测（M14/M15 收敛段
+# 留一会话验证）表明耦合是【加性】而非乘性：
+#     u_fb = g_fb(q_fb) + c_fb(q_lr)   （own + 交叉）
+#     u_lr = g_lr(q_lr) + c_lr(q_fb)
+# 即"本轴多项式 + 另一轴角度的多项式"。它比全乘性 2D 多项式更稳健：
+# 留出验证 fb 40.0→24.0、lr 31.5→18.6（乘性 2D 反把 fb 劣化到 48.1）。
+#
+# c 是 g 的严格超集（c≡0 退回 v7），交叉项系数完全由数据联合最小二乘拟合，
+# 几何运动学只决定"启用哪个方向的交叉项"这一先验，数值不取自几何。
+
+
+def fit_additive_cross(q_self: np.ndarray, q_other: np.ndarray, u: np.ndarray,
+                       degree: int = 3) -> tuple[np.ndarray, np.ndarray]:
+    """联合拟合加性逆映射 u = own(q_self) + cross(q_other)。
+
+    设计矩阵 = [1, q_self, ..., q_self^degree] + [q_other, ..., q_other^degree]
+    （cross 无常数项，常数归 own）。返回 (own_coeffs, cross_coeffs)：
+    own 长度 degree+1（[b0..bd]，对应 q_self^0..^degree），
+    cross 长度 degree（[c1..cd]，对应 q_other^1..^degree）。
+    """
+    cols = [np.ones_like(q_self)]
+    cols += [q_self ** k for k in range(1, degree + 1)]
+    cols += [q_other ** k for k in range(1, degree + 1)]
+    A = np.column_stack(cols)
+    coeffs, *_ = np.linalg.lstsq(A, u, rcond=None)
+    return coeffs[:degree + 1], coeffs[degree + 1:]
+
+
+def eval_additive_cross(own: np.ndarray, cross: np.ndarray, q_self, q_other) -> np.ndarray:
+    """加性交叉模型求值 u = own(q_self) + cross(q_other)。"""
+    out = eval_poly(own, q_self)
+    for k, c in enumerate(cross):
+        out = out + c * np.asarray(q_other, dtype=float) ** (k + 1)
     return out

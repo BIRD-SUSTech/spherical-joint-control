@@ -1,45 +1,95 @@
-# 当前阶段命令清单：PID 整定（抑制 0.61s / 1.5Hz 顿挫振荡）
-# 更新日期：2026-09-09
-# 背景：顿挫感 = 反馈环激发的 1.5Hz 极限环（前馈已占 81.7% 且干净，问题在反馈侧）
-# 目标：降 Kp 等让振荡衰减、MAE 不恶化
-# 前置：conda activate spherical_joint；会话回传 M*_verification/data/
-# 判据（每条跑完 --all 评测）：残差 std 下降（尤其锯齿）+ MAE 不恶化
-
-# 固定轨迹：circle 15°/8s（顿挫明显），前馈 v7 + fade 1.0
+# ============================================================
+# 新硬件 rig2：稳态前馈从头重建（动态前馈暂缓，完成稳态后再讨论）
+# ============================================================
+# 硬件变更：缆绳弹性更小、舵机驱动更强、结构不变
+# 固件协议：v2 单帧多通道（11 字节，已实现）——host 端无需开关
+# 接口不变：舵机 COM5 / 力传感器 COM3 / 动捕 10.1.1.198
+# 力传感器：只取 ch1–ch4 = 4 根缆张力（ch5/ch6 不用）
+# 铁律：每级只进不退（A/B 持平或更好才 merge）；M3 标定增益必须在 M4 开环之前
+# 判据：python -m valuation.evaluate <session> --all（MAE/RMSE/max + 残差 std）
+# 归档：会话回传 /mnt/nas/.../M*_verification/data/
+# 旧 rig1 的 configs/controller_v1..v8 全部作废，新 rig 用 configs/rig2_v*.json
 
 # ============================================================
-# 阶段 1：Kp 扫描（最优先，验证"增益是振荡放大器"）
+# M1+M2：最小闭环 + 采集自检（验证闭环/符号/采集链路）
 # ============================================================
-# Kp=8（baseline，M14 已有数据可对比）
-python -m collect.orchestrator --circle 15 8 --duration 60 --servo-port COM5 --force-port COM3 --calibration calibrations/rig1.json --controller-config configs/controller_v7.json --startup-fade 1.0 --kp 8
+# 先离线 mock 跑通（无硬件，验证代码）
+python -m collect.orchestrator --mock --circle 5 8 --duration 5
 
-# Kp=4
-python -m collect.orchestrator --circle 15 8 --duration 60 --servo-port COM5 --force-port COM3 --calibration calibrations/rig1.json --controller-config configs/controller_v7.json --startup-fade 1.0 --kp 4
-
-# Kp=2
-python -m collect.orchestrator --circle 15 8 --duration 60 --servo-port COM5 --force-port COM3 --calibration calibrations/rig1.json --controller-config configs/controller_v7.json --startup-fade 1.0 --kp 2
-
-# Kp=1
-python -m collect.orchestrator --circle 15 8 --duration 60 --servo-port COM5 --force-port COM3 --calibration calibrations/rig1.json --controller-config configs/controller_v7.json --startup-fade 1.0 --kp 1
-
-# 每条跑完评测
-python -m valuation.evaluate <session_dir> --all
+# 实机：小圆 5°/8s × 20s。闭环 PID 不消费增益，rig2.json 增益为 null 也可跑；
+# 此步只看：① 球杆是否跟着圆走 ② 方向对（不对改 rig2.json 的 front_back_sign/left_right_sign）
+# ③ mocap/servo/imu/force 四路 CSV 是否都落盘
+python -m collect.orchestrator --circle 5 8 --duration 20 \
+  --servo-port COM5 --force-port COM3 --calibration calibrations/rig2.json
 
 # ============================================================
-# 阶段 2（阶段 1 找到最优 Kp 后）：Kd 扫描（阻尼）
+# M3：符号 + 增益标定（安全前提，必须先于 M4 开环）
 # ============================================================
-# 固定最优 Kp，Kd 扫 2.5 → 1 → 0.5 → 0
-# python -m collect.orchestrator --circle 15 8 --duration 60 ... --kp <最优> --kd 1.0
-# python -m collect.orchestrator --circle 15 8 --duration 60 ... --kp <最优> --kd 0.5
+# 单轴微幅阶跃 offset=20/40/60 → 2×2 增益矩阵 + 符号，写回 rig2.json
+# 新舵机更强，60 offset 产生的角度可能比旧 rig 大，但仍在个位数度，安全
+python -m control.calibrate --servo-port COM5 --out calibrations/rig2.json \
+  --csv <M3会话>/calibration.csv
+
+# 检查：cat calibrations/rig2.json 确认 gain_deg_per_offset 已非 null
+# （若为 null，M4 开环会被 orchestrator 直接拒绝执行）
+
+# 力标定（共模预紧 §8.3.2 用）：确认 ch1..ch4 与 4 根缆的对应关系
+# 用单缆微幅阶跃看哪路张力变化（不猜测，数据确认）
 
 # ============================================================
-# 阶段 3（可选）：死区 + Ki
+# M4：开环激励（用 M3 实测增益，覆盖 ±5° 工作区）
 # ============================================================
-# 死区 0.2 → 0.1 → 0.05；Ki 1 → 0.5 → 0.2
-# python -m collect.orchestrator --circle 15 8 --duration 60 ... --kp <最优> --kd <最优> --deadband 0.1
-# python -m collect.orchestrator --circle 15 8 --duration 60 ... --kp <最优> --ki 0.5
+python -m collect.orchestrator --open-loop \
+  --servo-port COM5 --force-port COM3 --calibration calibrations/rig2.json
+
+# ============================================================
+# 级 1：稳态逆映射 g(q)（开环拟合，含 bias + slew）
+# ============================================================
+# 前提：M4 开环已跑（default_segments 覆盖 ±5°）。g(q) 只在拟合范围内有效，
+# A/B 必须用 circle5（在 ±5° 内，不外推）。大角度在"滚雪球"阶段单独扩。
+python -m model.fit_controller --session <M4会话1> <M4会话2> \
+  --out configs/rig2_v1.json --slew-limit 2.0
+# 检查：无"⚠️ 非单调"告警（有则降 --degree 或回退 direction_gains）
+
+# A/B：级1 vs 纯 PID（circle5，同轨迹、同中立起步、段间回正）
+python -m collect.orchestrator --ab --circle 5 8 --duration 40 \
+  --servo-port COM5 --force-port COM3 --calibration calibrations/rig2.json \
+  --controller-config configs/rig2_v1.json --startup-fade 1.0
+
+# 判据：valuation.evaluate <会话> --ab → fb/lr 两轴 MAE/RMSE 都不劣于纯 PID 才 merge 级1；
+#       任何一轴回退 → 否决，回到纯 PID 重查 M3/M4。
+
+# ============================================================
+# 滚雪球：大角度扩展（级1 merge 后，扩 ±10/15/20°）
+# ============================================================
+# --open-loop --large-angle 覆盖 ±15/20° → 重拟合 g(q) → 大角度 A/B
+# （这是"级1 之后"的独立一步，不并入级1，逐级推进）
+
+# ============================================================
+# 级 1.6：几何耦合 gain_cross（需 ≥2 个 2D 闭环收敛段）
+# ============================================================
+# 先采 2D 闭环（circle20 覆盖工作区 + 收敛段）
+python -m collect.orchestrator --circle 20 10 --duration 60 \
+  --servo-port COM5 --force-port COM3 --calibration calibrations/rig2.json \
+  --controller-config configs/rig2_v1.json --startup-fade 1.0
+
+# 留一会话护栏拟合（只有两轴都不劣于 1D 才写 gain_cross）
+python -m model.fit_controller --converged-only --couple \
+  --session <circle20会话1> <circle20会话2> \
+  --out configs/rig2_v2.json --slew-limit 2.0
+
+# ============================================================
+# 机制 A：收敛段精化 g(q)（大角度滚雪球）
+# ============================================================
+# --open-loop --large-angle 覆盖 ±15/20° 后收敛段重拟合（级1.6 之后）
+
+# ============================================================
+# 动态前馈（迟滞/摩擦/速度）——【暂缓】
+# ============================================================
+# 完成稳态前馈（g(q) + gain_cross + 收敛段精化 + 大角度）并 A/B 收敛后，再讨论动态项。
 
 # ============================================================
 # 分析口径（开发 PC，数据回传后）
 # ============================================================
-# 残差自相关首个峰（顿挫周期）+ std + MAE；期望 Kp 降后 0.61s 分量衰减
+# valuation.evaluate <session> --all  → metrics.json + 分段图
+# model.fit_controller --converged-only --couple  → 留出护栏

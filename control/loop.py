@@ -170,7 +170,8 @@ def main() -> int:
                 out_fb = fade * ff_fb + out_fb
                 out_lr = fade * ff_lr + out_lr
 
-            bus.send_pair(int(out_fb), int(out_lr))
+            c_fb, c_lr = calib.common_mode(curr_fb, curr_lr)
+            bus.send_pair_tension(int(out_fb), int(out_lr), c_fb, c_lr)
 
             if writer is not None:
                 writer.writerow([round(t, 4), round(t_fb, 4), round(t_lr, 4),
@@ -193,7 +194,7 @@ def main() -> int:
         # 不用 bus.relax()(id=0)：固件会四路完全放线，导致过度放线/杆垂落（实机反馈）。
         # id=0 松缆仅留给急停/guardian(关节角超限)场景。
         logger.info("收尾：回中位 (offset=0, offset=0)")
-        bus.send_pair(0, 0)
+        bus.send_pair_tension(0, 0, 0, 0)  # 差分 + 共模同时回零
         time.sleep(1.5)  # 等待舵机回到中位
         bus.close()
         mocap.stop()

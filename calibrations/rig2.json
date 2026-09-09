@@ -1,0 +1,8 @@
+{
+  "_note": "rig2 新硬件（缆更硬、舵机更强、结构不变）。符号/欧拉映射沿用 rig1 结构先验（结构未变），增益为 null=【未标定】。open-loop 激励前必须先跑 M3 填真实增益，否则 orchestrator 会拒绝开环。",
+  "front_back_euler": "roll",
+  "left_right_euler": "pitch",
+  "front_back_sign": 1,
+  "left_right_sign": 1,
+  "gain_deg_per_offset": null
+}

@@ -1,4 +1,9 @@
-"""力传感器 MODBUS-RTU 采集线程（提炼自 archive/data_collection/sensor_collectors/force_collector.py）。"""
+"""力传感器 MODBUS-RTU 采集线程（提炼自 archive/data_collection/sensor_collectors/force_collector.py）。
+
+通道映射（新硬件 rig2 确认）：ch1–ch4 = 4 根缆的张力（共模预紧标定 §8.3.2 只用这 4 个），
+ch5/ch6 不用。ch1..ch4 与协议 CH1..CH4（4 个舵机）的【物理缆对应关系】在 M3 力标定时
+用单缆阶跃实测确认（不猜测）。
+"""
 
 from __future__ import annotations
 

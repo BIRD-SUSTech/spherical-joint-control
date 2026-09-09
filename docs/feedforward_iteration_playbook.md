@@ -3,6 +3,18 @@
 > 目的：① 记录本平台稳态前馈 v1→v7 的收敛历程（数据留痕）；② 抽象成可复现 SOP，
 > 硬件更新后照单高效重跑。
 
+## 〇、rig2 重启（新硬件，从头再跑一轮）
+
+- **硬件变更**：缆绳弹性更小、舵机更强、结构不变；固件协议 v2 单帧多通道（11 字节）。
+- **接口不变**：舵机 COM5 / 力 COM3 / 动捕 10.1.1.198；力只取 ch1–ch4。
+- **旧数据全部归档作废**：`configs/controller_v1..v8`、`calibrations/rig1.json`（rig1 旧硬件）。
+- **新命名**：`calibrations/rig2.json`（标定）、`configs/rig2_v*.json`（前馈）。
+- **安全铁律**：新舵机更强 → 真实增益更大 → 用旧增益做开环会超调。开环前必须先 M3 标定，
+  `rig2.json` 增益为 null 时 orchestrator 拒绝开环（已实现护栏）。
+- **本轮目标**：**稳态前馈**（g(q) + gain_cross + 收敛段精化 + 大角度滚雪球）。动态前馈
+  （迟滞/摩擦/速度）**暂缓**——待稳态前馈 A/B 收敛后再讨论。
+- 命令清单：`current_stage_cmds.txt`（已重写为 rig2 从头流程，只到稳态前馈）。
+
 ---
 
 ## 一、阶段总结（本平台数据留痕）
@@ -18,6 +30,7 @@
 | v6 | 分轴：fb 收敛段 + lr 开环 | fb 平均 −11%、lr≈0 | merge | cb65ad6 | M10_verification |
 | v7 开环 | 大角度开环重拟合 | circle20 从近失稳修复 | 过渡版（bias 退回不准） | cb062f3 | M11/M12_verification |
 | v7 真版 | 收敛段 ±20° + fade | 稳态/大角度/waypoints 全过 | **merge（最终）** | cf3a05a/e79dca4 | M13/M14/M15_verification |
+| v8 候选 | + 几何耦合交叉项（加性） | 留出验证 fb/lr RMSE −40%/−41% | **待实机 A/B**（离线护栏过） | （未上机） | M14/M15 收敛段 |
 
 ### 关键数据留痕
 
@@ -30,6 +43,7 @@
 | 大角度折叠 | v6 在 +15~20° g(q) 反转（b3=−0.032 过陡） | M11 |
 | 纯 PID 基线 | circle20 fb MAE 1.19 | M15 |
 | 最终 v7 真版 | circle20 fb −13~−15%、waypoints lr −33~−38% | M14/M15 |
+| 几何耦合（加性交叉） | 留出 RMSE：v7 39.9/31.4 → v8 24.0/18.5（offset） | M14/M15 收敛段 |
 
 ### 每轮的方法论结论（可迁移）
 
@@ -47,7 +61,24 @@
 ```
 M0 归档旧实现 → M1 L0+L3 最小闭环 → M2 L1 采集 → M3 标定+baseline → M4 开环激励
 ```
+
 产出：`calibrations/rig1.json`（符号+bias）、`configs/`（控制器参数）、baseline 数字。
+
+> **M3 内含一步共模预紧标定（§8.3.2，需固件共模通道）**：用力传感器/换向死区标定
+> `c_fb(q_lr)`、`c_lr(q_fb)`（每对两缆同收、只紧不松的偶函数），在 M4 开环辨识**之前**
+> 把系统预紧到"四缆张力 ≥ T_min"。预紧改变刚度/摩擦 → M4 起的 h(u)/g(q)/PID 全部要在
+> 已预紧系统上重做。
+
+#### 共模预紧标定 SOP（M3，前置，~半天）
+
+1. 固件实现协议 v2 单帧多通道（`hardware/protocol.py`：`0xAA|CMD|CH1..CH4|0x55`，
+   11 字节；CMD=0x01 把 4 个 int16 一次性原子写入 4 舵机，CMD=0x00 放松）。
+2. 开环扫 2D 工作区，`collect/sensors/force.py` 读每根缆张力 `T_i(q_fb,q_lr)`（或
+   triangle/eight 换向处测死区宽度 `δ_axis(q_orth)`）。
+3. 拟合偶函数 `c_axis(q_orth) = c0 + c2·q_orth² + …`（或按 |q_orth| 分箱查表），判据
+   `c_axis = argmin c  s.t. min_i T_i ≥ T_min`（或 `δ + margin`）。
+4. 写入 `calibrations/rigN.json`（与控制器参数严格分离；它属标定，不属 configs/）。
+5. 预紧生效后重跑 M4 开环辨识 + Kp/Kd 扫描（刚度已变，旧参数作废）。
 
 ### 级 1：方向分段增益（~1 天）
 
@@ -62,6 +93,22 @@ M0 归档旧实现 → M1 L0+L3 最小闭环 → M2 L1 采集 → M3 标定+base
 2. 生成 `controller_v2.json`（gain_poly + slew_limit）。
 3. A/B：连续轨迹（circle/lissajous/eight/variable-circle）。
 4. 判据：连续轨迹 −20%+ → merge。
+
+### 级 1.6：几何耦合解耦（加性交叉项，~1 天）
+
+前提：先有 ≥2 个闭环收敛段会话（覆盖 2D 工作区，如 circle20）。
+
+1. `model.fit_controller --converged-only --couple --session <会话1> <会话2> …`
+   联合拟合 `u = own(q_self) + cross(q_other)`，并做留一会话交叉验证。
+2. **护栏**：只有 `交叉 RMSE ≤ 1D RMSE`（fb 与 lr 两轴都满足）才写 `gain_cross`，
+   否则自动回退 1D（输出文件只有 `gain_poly`）。
+3. 产物 `configs/controller_vN_candidate.json`（含 `gain_poly` + `gain_cross`）。
+4. A/B：`--ab --controller-config <vN_candidate> --baseline-controller-config controller_v7.json`
+   （同轨迹、同中立起步、段间回正）。
+5. 判据：稳态 MAE/RMSE 两轴不劣于 v7 才 merge；任何一轴回退 → 否决，只保留 v7。
+
+> 关键：几何运动学只决定"交叉项方向"（fb 倾斜影响 lr 平衡，反之亦然），系数全由
+> 数据拟合。不要用几何算系数（实机缆路径/摩擦与理想球面大圆弧可能差很远）。
 
 ### 级 2 诊断（可选，先诊断再决定）
 
@@ -95,7 +142,7 @@ M0 归档旧实现 → M1 L0+L3 最小闭环 → M2 L1 采集 → M3 标定+base
 
 | 工具 | 用途 |
 |---|---|
-| `model.fit_controller` | 拟合 g(q)（开环 / 收敛段两种模式） |
+| `model.fit_controller` | 拟合 g(q)（开环 / 收敛段）；`--couple` 拟合几何耦合交叉项（留出护栏） |
 | `collect.orchestrator --ab` | 自动 A/B（baseline 可配 --baseline-controller-config） |
 | `valuation.evaluate --all` | 分段指标 + 6 子图 + 分段图/gif |
 | `--startup-fade` / `--inter-segment-settle` | 启动渐入 / 段间回正（A/B 公平性） |
