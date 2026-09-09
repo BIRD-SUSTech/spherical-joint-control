@@ -60,28 +60,49 @@ python -m collect.orchestrator --ab --circle 5 8 --duration 40 \
 #       任何一轴回退 → 否决，回到纯 PID 重查 M3/M4。
 
 # ============================================================
-# 滚雪球：大角度扩展（级1 merge 后，扩 ±10/15/20°）
+# 滚雪球：大角度扩展到 40°（级1 merge 后，逐级推进，绝不跳档）
 # ============================================================
-# --open-loop --large-angle 覆盖 ±15/20° → 重拟合 g(q) → 大角度 A/B
-# （这是"级1 之后"的独立一步，不并入级1，逐级推进）
+# 目标：g(q) 有效范围从 ±5° 一路扩到 ±40°（工作空间 40 度）。
+# 安全铁律：增益随幅度爬升，用小幅增益换算大角度 offset 会超调、逼近 guardian 70°。
+#          因此每扩一档，先用上一档实测的割线增益校正，再跑下一档（数据驱动，不猜）。
+
+# 档1：±15/20°（用 M3 实测增益起步）
+python -m collect.orchestrator --open-loop --large-angle \
+  --servo-port COM5 --force-port COM3 --calibration calibrations/rig2.json
+# 测割线增益（找出该档最大幅度段的有效增益）
+python -m model.measure_gain --session <档1会话>
+
+# 档2：±30/40°（用档1测得的 --gain-fb/--gain-lr 校正，防超调）
+python -m collect.orchestrator --open-loop --extreme \
+  --servo-port COM5 --force-port COM3 --calibration calibrations/rig2.json \
+  --gain-fb <档1割线增益fb*1.15> --gain-lr <档1割线增益lr*1.15>
+# 再测，确认实际达到的峰值角 ≈ 目标（若显著低于 40° → 增益仍偏保守，可再放大；若接近 70° 立刻停）
+
+# 合并重拟合 g(q)（原 M4 + 档1 + 档2 会话，覆盖 ±40°）
+python -m model.fit_controller --session <M4会话> <档1会话> <档2会话> \
+  --out configs/rig2_v2.json --slew-limit 2.0
+# 检查：无 "⚠️ 非单调" 告警；若 ±40° 内三阶多项式折叠 → 升 --degree 或分段
+
+# 大角度闭环 A/B（circle/waypoints ±20/30/40°，同轨迹 baseline vs 前馈）
+# 判据：两轴不劣于 baseline 才 merge；折叠/外推失败 → 否决
 
 # ============================================================
 # 级 1.6：几何耦合 gain_cross（需 ≥2 个 2D 闭环收敛段）
 # ============================================================
-# 先采 2D 闭环（circle20 覆盖工作区 + 收敛段）
-python -m collect.orchestrator --circle 20 10 --duration 60 \
+# 先采 2D 闭环（circle 覆盖工作区 + 收敛段；40° 范围用 circle30 起步）
+python -m collect.orchestrator --circle 30 10 --duration 60 \
   --servo-port COM5 --force-port COM3 --calibration calibrations/rig2.json \
   --controller-config configs/rig2_v1.json --startup-fade 1.0
 
 # 留一会话护栏拟合（只有两轴都不劣于 1D 才写 gain_cross）
 python -m model.fit_controller --converged-only --couple \
-  --session <circle20会话1> <circle20会话2> \
-  --out configs/rig2_v2.json --slew-limit 2.0
+  --session <circle30会话1> <circle30会话2> \
+  --out configs/rig2_v3.json --slew-limit 2.0
 
 # ============================================================
 # 机制 A：收敛段精化 g(q)（大角度滚雪球）
 # ============================================================
-# --open-loop --large-angle 覆盖 ±15/20° 后收敛段重拟合（级1.6 之后）
+# 40° 开环覆盖后，用闭环收敛段 (q_d, u_log) 重拟合 g(q)（级1.6 之后）
 
 # ============================================================
 # 动态前馈（迟滞/摩擦/速度）——【暂缓】

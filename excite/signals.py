@@ -145,6 +145,28 @@ def large_angle_segments():
     ]
 
 
+def extreme_segments():
+    """40° 工作空间扩展段（±30°/±40°，渐进，滚雪球最后一步）。
+
+    ⚠️ 安全前提：增益随幅度爬升（旧 rig ±1°→±5° 已 1.6×），用小幅增益直接换算 40°
+    的 offset 会超调、逼近 guardian 70°。因此本段集【必须】在 ±15/20° 段测出割线增益、
+    用 model.measure_gain 校正后再跑（见 current_stage_cmds.txt 滚雪球节）。
+    本段集用更低频（大摆幅 + 低速），guardian 70° 兜底。
+    """
+    return [
+        {"kind": "triangle", "axis": "fb", "amp_deg": 30.0, "freq": 0.05, "duration_s": 40.0},
+        {"kind": "triangle", "axis": "lr", "amp_deg": 30.0, "freq": 0.05, "duration_s": 40.0},
+        {"kind": "triangle", "axis": "fb", "amp_deg": 40.0, "freq": 0.04, "duration_s": 50.0},
+        {"kind": "triangle", "axis": "lr", "amp_deg": 40.0, "freq": 0.04, "duration_s": 50.0},
+        {"kind": "lissajous", "amp_fb_deg": 30.0, "amp_lr_deg": 30.0,
+         "f1": 0.04, "f2": 0.06, "duration_s": 60.0},
+        {"kind": "steps", "axis": "fb", "amps_deg": [10.0, 20.0, 30.0, 40.0],
+         "hold_s": 5.0, "settle_s": 2.0},
+        {"kind": "steps", "axis": "lr", "amps_deg": [10.0, 20.0, 30.0, 40.0],
+         "hold_s": 5.0, "settle_s": 2.0},
+    ]
+
+
 def sample_segment(seg: dict, fs: float, gain_fb: float = GAIN_FB, gain_lr: float = GAIN_LR):
     """展开一条激励段 → (t, fb, lr)。seg 见 default_segments()。"""
     kind = seg["kind"]

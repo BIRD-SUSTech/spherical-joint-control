@@ -13,6 +13,9 @@
   `rig2.json` 增益为 null 时 orchestrator 拒绝开环（已实现护栏）。
 - **本轮目标**：**稳态前馈**（g(q) + gain_cross + 收敛段精化 + 大角度滚雪球）。动态前馈
   （迟滞/摩擦/速度）**暂缓**——待稳态前馈 A/B 收敛后再讨论。
+- **工作空间**：从 M3 起覆盖 **±40°**（旧 rig 为 ±20°）。大角度开环用渐进滚雪球 +
+  割线增益校正（`model.measure_gain` + `--gain-fb/--gain-lr`），防增益爬升导致 offset
+  超调、逼近 guardian 70°。
 - 命令清单：`current_stage_cmds.txt`（已重写为 rig2 从头流程，只到稳态前馈）。
 
 ---

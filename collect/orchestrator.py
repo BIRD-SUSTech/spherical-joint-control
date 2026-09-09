@@ -43,7 +43,8 @@ from control.controller_config import ControllerConfig
 from control.trajectory import make_traj
 from control.pid import PIDController
 from excite.guardian import Guardian
-from excite.signals import default_segments, extended_segments, large_angle_segments, sample_segment
+from excite.signals import (default_segments, extended_segments, extreme_segments,
+                            large_angle_segments, sample_segment)
 from hardware.mocap import MockMocap, MocapReader, Pose
 from hardware.servo import MockServoBus, ServoBus
 
@@ -107,6 +108,11 @@ def parse_args() -> argparse.Namespace:
                    help="开环总时长上限 s（缺省=跑完所有激励段）")
     p.add_argument("--extended", action="store_true", help="用补数据扩展激励段（M5 充分采集）")
     p.add_argument("--large-angle", action="store_true", help="大角度滚雪球激励段（±15°/±20°）")
+    p.add_argument("--extreme", action="store_true", help="40° 工作空间扩展段（±30°/±40°）")
+    p.add_argument("--gain-fb", type=float, default=None,
+                   help="开环 deg→offset 换算增益覆盖（°/offset，滚雪球割线增益校正用）")
+    p.add_argument("--gain-lr", type=float, default=None,
+                   help="开环 deg→offset 换算增益覆盖（°/offset，滚雪球割线增益校正用）")
     return p.parse_args()
 
 
@@ -211,9 +217,12 @@ class Orchestrator:
             # 7. 控制循环（开环激励 或 闭环 PID）
             if args.open_loop:
                 segs = _pick_segments(args)
+                label = ("extreme" if args.extreme
+                         else "large-angle" if args.large_angle
+                         else "extended" if args.extended
+                         else "default")
                 logger.info("开环激励启动（%dHz），段数=%d（%s）",
-                            args.open_loop_fs, len(segs),
-                            "large-angle" if args.large_angle else ("extended" if args.extended else "default"))
+                            args.open_loop_fs, len(segs), label)
                 self._run_open_loop(args.open_loop_fs, args.open_loop_duration)
             elif args.ab:
                 base_ctrl = self._baseline_controller
@@ -402,7 +411,13 @@ class Orchestrator:
             logger.error("标定缺少 gain_deg_per_offset，无法安全开环；请先跑 M3 标定"
                          "（python -m control.calibrate --servo-port <端口> --out calibrations/rig2.json）")
             return
-        logger.info("开环激励使用标定增益 fb=%.4f lr=%.4f（°/offset）",
+        # 滚雪球割线增益校正：--gain-fb/--gain-lr 覆盖标定增益（40° 段必用，防增益爬升超调）
+        gains = dict(gains)
+        if self._args.gain_fb is not None:
+            gains["front_back"] = self._args.gain_fb
+        if self._args.gain_lr is not None:
+            gains["left_right"] = self._args.gain_lr
+        logger.info("开环激励使用增益 fb=%.4f lr=%.4f（°/offset）",
                     gains["front_back"], gains["left_right"])
         for seg_id, seg in enumerate(segments):
             if duration_s is not None and time.perf_counter() - t_start >= duration_s:
@@ -584,7 +599,9 @@ def _trajectory_info(args) -> dict:
 
 
 def _pick_segments(args):
-    """选择开环激励段集：large-angle > extended > default。"""
+    """选择开环激励段集：extreme > large-angle > extended > default。"""
+    if args.extreme:
+        return extreme_segments()
     if args.large_angle:
         return large_angle_segments()
     if args.extended:
