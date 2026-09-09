@@ -23,6 +23,7 @@ from __future__ import annotations
 import argparse
 import json
 import logging
+import math
 import sys
 import time
 from pathlib import Path
@@ -72,6 +73,11 @@ def parse_args() -> argparse.Namespace:
     p.add_argument("--sweep-s", type=float, default=0.5, help="每个 c 值保持时长 s（等张力稳定）")
     p.add_argument("--settle-s", type=float, default=1.5, help="对间回中位时长 s")
     p.add_argument("--degree", type=int, default=2, help="偶多项式阶数（2 → c0+c2·q²）")
+    p.add_argument("--dynamic", action="store_true",
+                   help="动态标定：跑驱动轴正弦(制造换向)，扫【恒定】共模 c0，测动态最小张力（推荐）")
+    p.add_argument("--drive-amp", type=float, default=20.0, help="动态标定驱动轴幅度 °")
+    p.add_argument("--drive-freq", type=float, default=0.1, help="动态标定驱动轴频率 Hz")
+    p.add_argument("--drive-duration", type=float, default=20.0, help="每个 c0 值跑轨迹时长 s")
     p.add_argument("--kp", type=float, default=8.0)
     p.add_argument("--ki", type=float, default=1.0)
     p.add_argument("--kd", type=float, default=2.5)
@@ -156,6 +162,50 @@ def fit_even(q_abs: np.ndarray, c: np.ndarray, degree: int) -> np.ndarray:
     return coeffs
 
 
+def dynamic_min_tension(bus, mocap, calib, force_client, pid_fb, pid_lr, controller,
+                        pair, amp, freq, duration, c_pair, fs=100.0) -> float:
+    """跑驱动轴正弦（正交轴持 0），叠恒定共模 c_pair，返回该对最小张力。
+
+    pair="left_right"（ch2/ch4）松弛由 fb 倾斜造成 → 驱动 fb 轴；
+    pair="front_back"（ch1/ch3）松弛由 lr 倾斜造成 → 驱动 lr 轴。
+    正弦在峰值处换向 = 最大倾斜 + 换向重合，正是动态松弛最深处。
+    """
+    i1, i2 = PAIR_FORCE_IDX[pair]
+    drive_fb = (pair == "left_right")
+    tmin = float("inf")
+    t0 = time.perf_counter()
+    last_force = time.time() - 1.0
+    pid_fb.reset()
+    pid_lr.reset()
+    while time.perf_counter() - t0 < duration:
+        t = time.perf_counter() - t0
+        drive = amp * math.sin(2 * math.pi * freq * t)
+        t_fb = drive if drive_fb else 0.0
+        t_lr = 0.0 if drive_fb else drive
+        pose = mocap.get_pose()
+        if pose is None:
+            time.sleep(1.0 / fs)
+            continue
+        curr_fb, curr_lr = calib.map_pose(pose.roll, pose.pitch)
+        pid_fb.target = t_fb
+        pid_lr.target = t_lr
+        u_fb = pid_fb.calculate(curr_fb)
+        u_lr = pid_lr.calculate(curr_lr)
+        if controller.has_feedforward():
+            ff_fb, ff_lr = controller.feedforward(t_fb, t_lr)
+            u_fb += ff_fb
+            u_lr += ff_lr
+        c_fb = c_pair if pair == "front_back" else 0
+        c_lr = c_pair if pair == "left_right" else 0
+        bus.send_pair_tension(int(u_fb), int(u_lr), int(c_fb), int(c_lr))
+        if time.time() - last_force > 0.1:  # ~10Hz 读力
+            tval = _read_force(force_client)
+            tmin = min(tmin, tval[i1], tval[i2])
+            last_force = time.time()
+        time.sleep(1.0 / fs)
+    return tmin
+
+
 # ---------------------------------------------------------------------------
 # 主流程
 # ---------------------------------------------------------------------------
@@ -217,40 +267,64 @@ def main() -> int:
 
     c_values = [round(v, 1) for v in np.arange(0.0, args.c_max + 1e-9, args.c_step)]
 
-    samples = {"front_back": [], "left_right": []}
-    for pair, poses in PAIR_POSES.items():
-        orth_idx = 1 if pair == "front_back" else 0  # 正交轴在 pose 里的下标
-        logger.info("=== 标定 %s 对共模（正交轴=%s）===", pair, "lr" if orth_idx == 1 else "fb")
-        for (t_fb, t_lr) in poses:
-            if guardian.is_triggered:
-                logger.error("guardian 触发，中止")
-                break
-            q_orth = t_lr if orth_idx == 1 else t_fb
-            u_fb, u_lr = hold_pose(bus, mocap, calib, pid_fb, pid_lr, controller,
-                                   t_fb, t_lr, args.hold_s)
-            c_needed = sweep_common(bus, force_client, pair, u_fb, u_lr,
-                                    c_values, args.t_min, args.sweep_s)
-            samples[pair].append((abs(q_orth), c_needed))
-            sat = "（饱和！c_max 未达 T_min）" if c_needed >= args.c_max else ""
-            logger.info("  位姿(fb=%+.0f,lr=%+.0f) |q_orth|=%2.0f° → c=%5.0f%s",
-                        t_fb, t_lr, abs(q_orth), c_needed, sat)
-        bus.send_pair_tension(0, 0, 0, 0)
-        time.sleep(args.settle_s)
-
-    # 拟合 + 写回
     co_tension = {}
-    for pair in ("front_back", "left_right"):
-        qs = np.array([s[0] for s in samples[pair]])
-        cs = np.array([s[1] for s in samples[pair]])
-        if len(qs) < 2:
-            logger.error("%s 样本不足，无法拟合", pair)
-            co_tension[pair] = [0.0] * (args.degree + 1)
-            continue
-        coeffs = fit_even(qs, cs, args.degree)
-        coeffs = np.maximum(coeffs, 0.0)  # 只紧不松
-        co_tension[pair] = [float(c) for c in coeffs]
-        logger.info("%s 共模偶多项式 c(q_orth)=%s", pair,
-                    "  ".join(f"c{k*2}={c:+.2f}" for k, c in enumerate(coeffs)))
+    if args.dynamic:
+        # 动态标定（推荐）：扫【恒定】共模 c0，跑驱动轴正弦制造换向，测动态最小张力。
+        # 动态换向松弛是恒定预紧问题，不是 ∝q² 的位置函数；静态持位测不到。
+        for pair in ("front_back", "left_right"):
+            drive = "fb" if pair == "left_right" else "lr"
+            logger.info("=== 动态标定 %s 对（驱动 %s 轴 ±%.0f°@%.2fHz）===",
+                        pair, drive, args.drive_amp, args.drive_freq)
+            c_needed = args.c_max
+            for c0 in c_values:
+                if guardian.is_triggered:
+                    logger.error("guardian 触发，中止")
+                    break
+                tmin = dynamic_min_tension(bus, mocap, calib, force_client,
+                                           pid_fb, pid_lr, controller,
+                                           pair, args.drive_amp, args.drive_freq,
+                                           args.drive_duration, c0)
+                logger.info("  c0=%3.0f → 最小张力=%.0f", c0, tmin)
+                if tmin >= args.t_min:
+                    c_needed = c0
+                    break
+            co_tension[pair] = [float(c_needed)]  # 恒定预紧（无 q² 项）
+            bus.send_pair_tension(0, 0, 0, 0)
+            time.sleep(args.settle_s)
+    else:
+        # 静态标定（偶多项式；⚠️ 静态持位测不到动态换向松弛，大角度场景请用 --dynamic）
+        samples = {"front_back": [], "left_right": []}
+        for pair, poses in PAIR_POSES.items():
+            orth_idx = 1 if pair == "front_back" else 0
+            logger.info("=== 静态标定 %s 对（正交轴=%s）===", pair, "lr" if orth_idx == 1 else "fb")
+            for (t_fb, t_lr) in poses:
+                if guardian.is_triggered:
+                    logger.error("guardian 触发，中止")
+                    break
+                q_orth = t_lr if orth_idx == 1 else t_fb
+                u_fb, u_lr = hold_pose(bus, mocap, calib, pid_fb, pid_lr, controller,
+                                       t_fb, t_lr, args.hold_s)
+                c_needed = sweep_common(bus, force_client, pair, u_fb, u_lr,
+                                        c_values, args.t_min, args.sweep_s)
+                samples[pair].append((abs(q_orth), c_needed))
+                sat = "（饱和！c_max 未达 T_min）" if c_needed >= args.c_max else ""
+                logger.info("  位姿(fb=%+.0f,lr=%+.0f) |q_orth|=%2.0f° → c=%5.0f%s",
+                            t_fb, t_lr, abs(q_orth), c_needed, sat)
+            bus.send_pair_tension(0, 0, 0, 0)
+            time.sleep(args.settle_s)
+
+        for pair in ("front_back", "left_right"):
+            qs = np.array([s[0] for s in samples[pair]])
+            cs = np.array([s[1] for s in samples[pair]])
+            if len(qs) < 2:
+                logger.error("%s 样本不足，无法拟合", pair)
+                co_tension[pair] = [0.0] * (args.degree + 1)
+                continue
+            coeffs = fit_even(qs, cs, args.degree)
+            coeffs = np.maximum(coeffs, 0.0)
+            co_tension[pair] = [float(c) for c in coeffs]
+            logger.info("%s 共模偶多项式 c(q_orth)=%s", pair,
+                        "  ".join(f"c{k*2}={c:+.2f}" for k, c in enumerate(coeffs)))
 
     out = Path(args.out or args.calibration)
     data = json.loads(Path(args.calibration).read_text(encoding="utf-8"))

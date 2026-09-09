@@ -88,19 +88,20 @@ python -m model.fit_controller --session <M4会话> <档1会话> <档2会话> \
 # ⚠️ 大角度闭环已观察到震荡：根因=四缆松弛（力 ch1-ch4≈0）→ 先做共模预紧，再复测
 
 # ============================================================
-# 共模预紧标定 c(q_orth)（§8.3.2，大角度震荡第一优先，先于级1.6）
+# 共模预紧标定（§8.3.2，大角度震荡第一优先，先于级1.6）
 # ============================================================
-# 力数据实锤：±20° 起四缆张力≈0（完全松弛），差分前馈补不了，必须共模。
-# 持位 → 对正交对两缆同加共模 offset 扫力 → 拟合偶多项式 c(q_orth)=c0+c2·q²
-python -m control.calibrate_co_tension \
+# 静态持位标定已证伪：静态张力已≥T_min → c≈0，测不到动态换向松弛。
+# 正确做法=【动态标定】：扫恒定共模 c0，跑驱动轴正弦制造换向，测动态最小张力。
+python -m control.calibrate_co_tension --dynamic \
   --servo-port COM5 --force-port COM3 \
   --calibration calibrations/rig2.json \
   --controller-config configs/rig2_v2.json \
-  --t-min 500 --c-max 400 --c-step 50
+  --t-min 500 --c-max 400 --c-step 50 \
+  --drive-amp 20 --drive-freq 0.1 --drive-duration 20
 
-# 检查：cat calibrations/rig2.json 确认 co_tension 已写入（非 [0,0]）
+# 检查：cat calibrations/rig2.json 确认 co_tension 已写入（应形如 [c0]，非 [0]）
 # 复测大角度闭环：circle20 或 waypoints ±30/40，看震荡是否消除
-# 若还有残余震荡 → 对"预紧后更硬"的系统做 Kd 扫描（Kp 保持 8 不降）
+# 若还有残余震荡 → 对"预紧后更硬"的系统做 Kd 扫描（Kd 已找到 U 形最优点 0.5，Kp 保持 8）
 
 # ============================================================
 # 级 1.6：几何耦合 gain_cross（需 ≥2 个 2D 闭环收敛段）
