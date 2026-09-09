@@ -1,28 +1,45 @@
-# 当前阶段命令清单：circle15 启动瞬态修复复测（--startup-fade）
-# 更新日期：2026-09-08
+# 当前阶段命令清单：PID 整定（抑制 0.61s / 1.5Hz 顿挫振荡）
+# 更新日期：2026-09-09
+# 背景：顿挫感 = 反馈环激发的 1.5Hz 极限环（前馈已占 81.7% 且干净，问题在反馈侧）
+# 目标：降 Kp 等让振荡衰减、MAE 不恶化
 # 前置：conda activate spherical_joint；会话回传 M*_verification/data/
+# 判据（每条跑完 --all 评测）：残差 std 下降（尤其锯齿）+ MAE 不恶化
+
+# 固定轨迹：circle 15°/8s（顿挫明显），前馈 v7 + fade 1.0
 
 # ============================================================
-# 背景：v7 真版在稳态/大角度/waypoints 全过，唯 circle15 启动前 2s
-#   峰值 9.5°（v6 3.4°）阻塞。已加 --startup-fade（默认 1s 前馈渐入）。
-# 对比：seg0=v6（无 fade）/ seg1=v7 真版 + fade
+# 阶段 1：Kp 扫描（最优先，验证"增益是振荡放大器"）
 # ============================================================
+# Kp=8（baseline，M14 已有数据可对比）
+python -m collect.orchestrator --circle 15 8 --duration 60 --servo-port COM5 --force-port COM3 --calibration calibrations/rig1.json --controller-config configs/controller_v7.json --startup-fade 1.0 --kp 8
 
-# circle 15°/8s（核心复测：启动前 2s 峰值应 ≤ v6 的 3.4°）
-python -m collect.orchestrator --ab --circle 15 8 --duration 60 --servo-port COM5 --force-port COM3 --calibration calibrations/rig1.json --controller-config configs/controller_v7.json --baseline-controller-config configs/controller_v6.json --startup-fade 1.0
+# Kp=4
+python -m collect.orchestrator --circle 15 8 --duration 60 --servo-port COM5 --force-port COM3 --calibration calibrations/rig1.json --controller-config configs/controller_v7.json --startup-fade 1.0 --kp 4
 
-# 若启动峰值仍大，可试 fade 延长到 1.5~2s：
-python -m collect.orchestrator --ab --circle 15 8 --duration 60 --servo-port COM5 --force-port COM3 --calibration calibrations/rig1.json --controller-config configs/controller_v7.json --baseline-controller-config configs/controller_v6.json --startup-fade 2.0
+# Kp=2
+python -m collect.orchestrator --circle 15 8 --duration 60 --servo-port COM5 --force-port COM3 --calibration calibrations/rig1.json --controller-config configs/controller_v7.json --startup-fade 1.0 --kp 2
 
-# circle 20°/10s（顺带复查 lr 散布尖峰）
-python -m collect.orchestrator --ab --circle 20 10 --duration 60 --servo-port COM5 --force-port COM3 --calibration calibrations/rig1.json --controller-config configs/controller_v7.json --baseline-controller-config configs/controller_v6.json --startup-fade 1.0
+# Kp=1
+python -m collect.orchestrator --circle 15 8 --duration 60 --servo-port COM5 --force-port COM3 --calibration calibrations/rig1.json --controller-config configs/controller_v7.json --startup-fade 1.0 --kp 1
 
 # 每条跑完评测
 python -m valuation.evaluate <session_dir> --all
 
 # ============================================================
-# 判据
+# 阶段 2（阶段 1 找到最优 Kp 后）：Kd 扫描（阻尼）
 # ============================================================
-# 1) circle15 启动(0-2s) fb 峰值 ≤ v6 的 ~3.4°（原 9.5° 应被 fade 压下来）
-# 2) circle15 稳态(t>5s) fb 保持 −8% 改善（fade 不应伤害稳态）
-# 3) circle20 保持 fb MAE −19% 改善
+# 固定最优 Kp，Kd 扫 2.5 → 1 → 0.5 → 0
+# python -m collect.orchestrator --circle 15 8 --duration 60 ... --kp <最优> --kd 1.0
+# python -m collect.orchestrator --circle 15 8 --duration 60 ... --kp <最优> --kd 0.5
+
+# ============================================================
+# 阶段 3（可选）：死区 + Ki
+# ============================================================
+# 死区 0.2 → 0.1 → 0.05；Ki 1 → 0.5 → 0.2
+# python -m collect.orchestrator --circle 15 8 --duration 60 ... --kp <最优> --kd <最优> --deadband 0.1
+# python -m collect.orchestrator --circle 15 8 --duration 60 ... --kp <最优> --ki 0.5
+
+# ============================================================
+# 分析口径（开发 PC，数据回传后）
+# ============================================================
+# 残差自相关首个峰（顿挫周期）+ std + MAE；期望 Kp 降后 0.61s 分量衰减
