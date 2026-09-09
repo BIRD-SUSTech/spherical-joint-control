@@ -85,6 +85,22 @@ python -m model.fit_controller --session <M4会话> <档1会话> <档2会话> \
 
 # 大角度闭环 A/B（circle/waypoints ±20/30/40°，同轨迹 baseline vs 前馈）
 # 判据：两轴不劣于 baseline 才 merge；折叠/外推失败 → 否决
+# ⚠️ 大角度闭环已观察到震荡：根因=四缆松弛（力 ch1-ch4≈0）→ 先做共模预紧，再复测
+
+# ============================================================
+# 共模预紧标定 c(q_orth)（§8.3.2，大角度震荡第一优先，先于级1.6）
+# ============================================================
+# 力数据实锤：±20° 起四缆张力≈0（完全松弛），差分前馈补不了，必须共模。
+# 持位 → 对正交对两缆同加共模 offset 扫力 → 拟合偶多项式 c(q_orth)=c0+c2·q²
+python -m control.calibrate_co_tension \
+  --servo-port COM5 --force-port COM3 \
+  --calibration calibrations/rig2.json \
+  --controller-config configs/rig2_v2.json \
+  --t-min 500 --c-max 400 --c-step 50
+
+# 检查：cat calibrations/rig2.json 确认 co_tension 已写入（非 [0,0]）
+# 复测大角度闭环：circle20 或 waypoints ±30/40，看震荡是否消除
+# 若还有残余震荡 → 对"预紧后更硬"的系统做 Kd 扫描（Kp 保持 8 不降）
 
 # ============================================================
 # 级 1.6：几何耦合 gain_cross（需 ≥2 个 2D 闭环收敛段）
@@ -92,7 +108,7 @@ python -m model.fit_controller --session <M4会话> <档1会话> <档2会话> \
 # 先采 2D 闭环（circle 覆盖工作区 + 收敛段；40° 范围用 circle30 起步）
 python -m collect.orchestrator --circle 30 10 --duration 60 \
   --servo-port COM5 --force-port COM3 --calibration calibrations/rig2.json \
-  --controller-config configs/rig2_v1.json --startup-fade 1.0
+  --controller-config configs/rig2_v2.json --startup-fade 1.0
 
 # 留一会话护栏拟合（只有两轴都不劣于 1D 才写 gain_cross）
 python -m model.fit_controller --converged-only --couple \
