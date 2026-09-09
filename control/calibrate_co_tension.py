@@ -75,6 +75,13 @@ def parse_args() -> argparse.Namespace:
     p.add_argument("--degree", type=int, default=2, help="偶多项式阶数（2 → c0+c2·q²）")
     p.add_argument("--dynamic", action="store_true",
                    help="动态标定：跑驱动轴正弦(制造换向)，扫【恒定】共模 c0，测动态最小张力（推荐）")
+    p.add_argument("--open-loop", action="store_true",
+                   help="开环静态标定：发单轴恒定 offset→稳态→读实际位姿→扫正交对共模 c→拟合 c(q)。"
+                        "开环 u_orth=0 正是换向瞬间的差分条件，能测到位置相关的几何松弛")
+    p.add_argument("--gain-fb", type=float, default=None, help="开环换算增益覆盖（°/offset）")
+    p.add_argument("--gain-lr", type=float, default=None, help="开环换算增益覆盖（°/offset）")
+    p.add_argument("--max-offset", type=float, default=500.0,
+                   help="开环单轴 offset 上限（防增益爬升超调，guardian 兜底）")
     p.add_argument("--drive-amp", type=float, default=20.0, help="动态标定驱动轴幅度 °")
     p.add_argument("--drive-freq", type=float, default=0.1, help="动态标定驱动轴频率 Hz")
     p.add_argument("--drive-duration", type=float, default=20.0, help="每个 c0 值跑轨迹时长 s")
@@ -291,8 +298,58 @@ def main() -> int:
             co_tension[pair] = [float(c_needed)]  # 恒定预紧（无 q² 项）
             bus.send_pair_tension(0, 0, 0, 0)
             time.sleep(args.settle_s)
+    elif args.open_loop:
+        # 开环静态：发单轴恒定 offset → 等自由响应衰减到稳态 → 读实际位姿 → 扫正交对共模 c。
+        # 开环 u_orth=0 正是换向瞬间的差分条件（两缆回中性），能测到位置相关的几何松弛，
+        # 不像闭环持位那样被正交 PID 的差分输出掩盖。
+        samples = {"front_back": [], "left_right": []}
+        gains = calib.gain_deg_per_offset
+        for pair, poses in PAIR_POSES.items():
+            drive_fb = (pair == "left_right")  # 左右对松弛由 fb 倾斜造成 → 驱动 fb
+            logger.info("=== 开环静态标定 %s 对（驱动 %s 轴）===",
+                        pair, "fb" if drive_fb else "lr")
+            for (t_fb, t_lr) in poses:
+                if guardian.is_triggered:
+                    logger.error("guardian 触发，中止")
+                    break
+                t_drive = t_fb if drive_fb else t_lr
+                g = args.gain_fb if drive_fb else args.gain_lr
+                g = g if g is not None else gains["front_back" if drive_fb else "left_right"]
+                off = t_drive / g if g else 0.0
+                off = max(-args.max_offset, min(args.max_offset, off))  # 防增益爬升超调
+                u_fb, u_lr = (off, 0.0) if drive_fb else (0.0, off)
+                for _ in range(int(args.hold_s * 100)):
+                    bus.send_pair_tension(int(u_fb), int(u_lr), 0, 0)
+                    time.sleep(0.01)
+                pose = mocap.get_pose()
+                if pose is None:
+                    logger.warning("无动捕帧，跳过")
+                    continue
+                q_fb, q_lr = calib.map_pose(pose.roll, pose.pitch)
+                q_orth = q_lr if pair == "front_back" else q_fb
+                c_needed = sweep_common(bus, force_client, pair, u_fb, u_lr,
+                                        c_values, args.t_min, args.sweep_s)
+                samples[pair].append((abs(q_orth), c_needed))
+                sat = "（饱和！）" if c_needed >= args.c_max else ""
+                logger.info("  off=%+.0f → 实际(q_fb=%+.1f,q_lr=%+.1f) |q_orth|=%2.1f° → c=%5.0f%s",
+                            off, q_fb, q_lr, abs(q_orth), c_needed, sat)
+            bus.send_pair_tension(0, 0, 0, 0)
+            time.sleep(args.settle_s)
+
+        for pair in ("front_back", "left_right"):
+            qs = np.array([s[0] for s in samples[pair]])
+            cs = np.array([s[1] for s in samples[pair]])
+            if len(qs) < 2:
+                logger.error("%s 样本不足", pair)
+                co_tension[pair] = [0.0] * (args.degree + 1)
+                continue
+            coeffs = fit_even(qs, cs, args.degree)
+            coeffs = np.maximum(coeffs, 0.0)
+            co_tension[pair] = [float(c) for c in coeffs]
+            logger.info("%s 共模 c(q)=%s", pair,
+                        "  ".join(f"c{k*2}={c:+.2f}" for k, c in enumerate(coeffs)))
     else:
-        # 静态标定（偶多项式；⚠️ 静态持位测不到动态换向松弛，大角度场景请用 --dynamic）
+        # 静态持位（偶多项式；⚠️ 闭环持位测不到动态换向松弛，大角度场景请用 --dynamic 或 --open-loop）
         samples = {"front_back": [], "left_right": []}
         for pair, poses in PAIR_POSES.items():
             orth_idx = 1 if pair == "front_back" else 0

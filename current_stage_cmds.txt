@@ -91,7 +91,20 @@ python -m model.fit_controller --session <M4会话> <档1会话> <档2会话> \
 # 共模预紧标定（§8.3.2，大角度震荡第一优先，先于级1.6）
 # ============================================================
 # 静态持位标定已证伪：静态张力已≥T_min → c≈0，测不到动态换向松弛。
-# 正确做法=【动态标定】：扫恒定共模 c0，跑驱动轴正弦制造换向，测动态最小张力。
+# 两种正确做法（可都跑、取较大值）：
+#   A) 开环静态：发单轴恒定 offset→稳态→读实际位姿→扫正交对共模 c→拟合 c(q)
+#      （u_orth=0 正是换向瞬间的差分条件，能测到位置相关的几何松弛）
+#   B) 动态：扫恒定 c0，跑驱动轴正弦制造换向，测动态最小张力（覆盖速度分量）
+
+# A) 开环静态标定（位置相关 c(q)，用雪球测得的割线增益换算，防超调）
+python -m control.calibrate_co_tension --open-loop \
+  --servo-port COM5 --force-port COM3 \
+  --calibration calibrations/rig2.json \
+  --gain-fb 0.090 --gain-lr 0.082 \
+  --t-min 500 --c-max 400 --c-step 50 \
+  --max-offset 500 --hold-s 4
+
+# B) 动态标定（恒定 c0 兜底）
 python -m control.calibrate_co_tension --dynamic \
   --servo-port COM5 --force-port COM3 \
   --calibration calibrations/rig2.json \
@@ -99,7 +112,7 @@ python -m control.calibrate_co_tension --dynamic \
   --t-min 500 --c-max 400 --c-step 50 \
   --drive-amp 20 --drive-freq 0.1 --drive-duration 20
 
-# 检查：cat calibrations/rig2.json 确认 co_tension 已写入（应形如 [c0]，非 [0]）
+# 检查：cat calibrations/rig2.json 确认 co_tension 已写入（A 给 [c0,c2,...]；B 给 [c0]）
 # 复测大角度闭环：circle20 或 waypoints ±30/40，看震荡是否消除
 # 若还有残余震荡 → 对"预紧后更硬"的系统做 Kd 扫描（Kd 已找到 U 形最优点 0.5，Kp 保持 8）
 
