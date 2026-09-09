@@ -90,6 +90,11 @@ def parse_args() -> argparse.Namespace:
                    help="A/B 段间回正时长 s（默认 5，持续发 0 让球杆回到中立平衡态）")
     p.add_argument("--startup-fade", type=float, default=1.0,
                    help="前馈启动渐入时长 s（0=不渐入；启动后该秒内按比例放行前馈）")
+    p.add_argument("--kp", type=float, default=8.0, help="PID 比例增益")
+    p.add_argument("--ki", type=float, default=1.0, help="PID 积分增益")
+    p.add_argument("--kd", type=float, default=2.5, help="PID 微分增益")
+    p.add_argument("--deadband", type=float, default=0.2, help="PID 死区（度）")
+    p.add_argument("--alpha", type=float, default=0.3, help="反馈低通系数")
     p.add_argument("--rb", type=int, default=0, help="动捕刚体索引")
     p.add_argument("--no-imu", action="store_true", help="不采集 IMU")
     p.add_argument("--no-force", action="store_true", help="不采集力传感器")
@@ -312,10 +317,10 @@ class Orchestrator:
 
     def _run_control_loop(self, duration_s: float, segment_id: int | None = None,
                           controller=None) -> None:
-        pid_fb = PIDController(kp=KP, ki=KI, kd=KD, limit=LIMIT,
-                               deadband=DEADBAND, alpha=ALPHA)
-        pid_lr = PIDController(kp=KP, ki=KI, kd=KD, limit=LIMIT,
-                               deadband=DEADBAND, alpha=ALPHA)
+        pid_fb = PIDController(kp=self._args.kp, ki=self._args.ki, kd=self._args.kd, limit=LIMIT,
+                               deadband=self._args.deadband, alpha=self._args.alpha)
+        pid_lr = PIDController(kp=self._args.kp, ki=self._args.ki, kd=self._args.kd, limit=LIMIT,
+                               deadband=self._args.deadband, alpha=self._args.alpha)
 
         t0 = time.perf_counter()
         dt = 1.0 / LOOP_HZ
@@ -538,6 +543,13 @@ class Orchestrator:
                 "duration": self._args.duration,
                 "ab": self._args.ab,
                 "inter_segment_settle": self._args.inter_segment_settle,
+                "pid": {
+                    "kp": self._args.kp,
+                    "ki": self._args.ki,
+                    "kd": self._args.kd,
+                    "deadband": self._args.deadband,
+                    "alpha": self._args.alpha,
+                },
             },
         }
         self._session.metadata_json.write_text(

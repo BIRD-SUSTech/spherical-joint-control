@@ -68,6 +68,11 @@ def parse_args() -> argparse.Namespace:
                    help="控制器参数 JSON（前馈增益等；缺省=无前馈 u_ff=0）")
     p.add_argument("--startup-fade", type=float, default=1.0,
                    help="前馈启动渐入时长 s（0=不渐入；启动后该秒内按比例放行前馈）")
+    p.add_argument("--kp", type=float, default=8.0, help="PID 比例增益")
+    p.add_argument("--ki", type=float, default=1.0, help="PID 积分增益")
+    p.add_argument("--kd", type=float, default=2.5, help="PID 微分增益")
+    p.add_argument("--deadband", type=float, default=0.2, help="PID 死区（度）")
+    p.add_argument("--alpha", type=float, default=0.3, help="反馈低通系数")
     p.add_argument("--rb", type=int, default=0, help="动捕刚体索引")
     p.add_argument("--no-csv", action="store_true", help="不写闭环 CSV")
     return p.parse_args()
@@ -111,10 +116,10 @@ def main() -> int:
     if not bus.connect():
         return 1
 
-    pid_fb = PIDController(kp=KP, ki=KI, kd=KD, limit=LIMIT,
-                           deadband=DEADBAND, alpha=ALPHA)
-    pid_lr = PIDController(kp=KP, ki=KI, kd=KD, limit=LIMIT,
-                           deadband=DEADBAND, alpha=ALPHA)
+    pid_fb = PIDController(kp=args.kp, ki=args.ki, kd=args.kd, limit=LIMIT,
+                           deadband=args.deadband, alpha=args.alpha)
+    pid_lr = PIDController(kp=args.kp, ki=args.ki, kd=args.kd, limit=LIMIT,
+                           deadband=args.deadband, alpha=args.alpha)
 
     # CSV（M2 起由 collect 层统一 schema；此处为最小列，物理命名）
     csv_path = None
