@@ -267,9 +267,9 @@ def main() -> int:
     guardian = Guardian(mocap, bus, calib, args.limit_deg)
     guardian.start()
 
-    pid_fb = PIDController(kp=args.kp, ki=args.ki, kd=args.kd, limit=400.0,
+    pid_fb = PIDController(kp=args.kp, ki=args.ki, kd=args.kd, limit=600.0,
                            deadband=args.deadband, alpha=args.alpha)
-    pid_lr = PIDController(kp=args.kp, ki=args.ki, kd=args.kd, limit=400.0,
+    pid_lr = PIDController(kp=args.kp, ki=args.ki, kd=args.kd, limit=600.0,
                            deadband=args.deadband, alpha=args.alpha)
 
     c_values = [round(v, 1) for v in np.arange(0.0, args.c_max + 1e-9, args.c_step)]

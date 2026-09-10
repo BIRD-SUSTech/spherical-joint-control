@@ -119,24 +119,13 @@ def make_traj(args):
             lr = sum(a * math.sin(2 * math.pi * f * t + ph) for f, a, ph in hs_lr) * amp
             return (fb * r, lr * r)
 
-    elif args.waypoints:
-        wps = _parse_waypoints(args.waypoints)
-        # 累计段起始时间（段间 RAMP_IN_S 平滑过渡，之后驻留）
-        starts = [0.0]
-        for _, _, d in wps:
-            starts.append(starts[-1] + d)
+    elif getattr(args, "grid", None):
+        # 2D 网格驻留（蛇形）：覆盖工作空间，供稳态前馈拟合（own/cross 正交可分离）
+        fb_min, fb_max, lr_min, lr_max, step, dur = args.grid
+        return _waypoint_traj(_grid_waypoints(fb_min, fb_max, lr_min, lr_max, step, dur))
 
-        def traj(t):
-            for i, (fb, lr, _) in enumerate(wps):
-                if t < starts[i + 1]:
-                    t_local = t - starts[i]
-                    if t_local < RAMP_IN_S:
-                        prev = wps[i - 1] if i > 0 else (0.0, 0.0, 0.0)
-                        r = t_local / RAMP_IN_S
-                        return (prev[0] + (fb - prev[0]) * r,
-                                prev[1] + (lr - prev[1]) * r)
-                    return (fb, lr)
-            return (wps[-1][0], wps[-1][1])
+    elif args.waypoints:
+        return _waypoint_traj(_parse_waypoints(args.waypoints))
 
     else:
 
@@ -152,3 +141,57 @@ def _parse_waypoints(flat) -> list[tuple[float, float, float]]:
         raise ValueError("--waypoints 参数需为 3 的倍数（fb lr dur 循环）")
     return [(float(flat[i]), float(flat[i + 1]), float(flat[i + 2]))
             for i in range(0, len(flat), 3)]
+
+
+def _frange(lo: float, hi: float, step: float) -> list[float]:
+    """闭区间浮点序列（含端点，步长 step）。"""
+    n = int(round((hi - lo) / step))
+    return [round(lo + i * step, 6) for i in range(n + 1)]
+
+
+def _grid_waypoints(fb_min, fb_max, lr_min, lr_max, step, dur) -> list[tuple[float, float, float]]:
+    """蛇形网格驻留点：按 lr 行逐行走，行间反向，相邻跳变恒为 step。"""
+    fbs = _frange(fb_min, fb_max, step)
+    lrs = _frange(lr_min, lr_max, step)
+    wps = []
+    for i, lr in enumerate(lrs):
+        row = fbs if i % 2 == 0 else list(reversed(fbs))
+        for fb in row:
+            wps.append((fb, lr, float(dur)))
+    return wps
+
+
+def trajectory_duration(args) -> float | None:
+    """轨迹的自然总时长（grid/waypoints = 各点时长之和；其余 None=无自然时长）。
+
+    供 orchestrator 在未显式给 --duration 时自动取全长，避免网格被 30s 默认值截断。
+    """
+    if getattr(args, "grid", None):
+        fb_min, fb_max, lr_min, lr_max, step, dur = args.grid
+        return sum(w[2] for w in _grid_waypoints(fb_min, fb_max, lr_min, lr_max, step, dur))
+    if getattr(args, "speed_ladder", None):
+        return len(args.speeds) * args.speed_seg_dur
+    if args.waypoints:
+        return sum(w[2] for w in _parse_waypoints(args.waypoints))
+    return None
+
+
+def _waypoint_traj(wps):
+    """点到点轨迹：段首 RAMP_IN_S 平滑过渡，之后驻留（--waypoints / --grid 共用）。"""
+    starts = [0.0]
+    for _, _, d in wps:
+        starts.append(starts[-1] + d)
+
+    def traj(t):
+        for i, (fb, lr, _) in enumerate(wps):
+            if t < starts[i + 1]:
+                t_local = t - starts[i]
+                if t_local < RAMP_IN_S:
+                    prev = wps[i - 1] if i > 0 else (0.0, 0.0, 0.0)
+                    r = t_local / RAMP_IN_S
+                    return (prev[0] + (fb - prev[0]) * r,
+                            prev[1] + (lr - prev[1]) * r)
+                return (fb, lr)
+        return (wps[-1][0], wps[-1][1])
+
+    return traj

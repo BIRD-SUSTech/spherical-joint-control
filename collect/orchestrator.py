@@ -40,7 +40,7 @@ from collect.session import SessionManager
 from collect.writer import CsvWriter
 from control.calibration import Calibration
 from control.controller_config import ControllerConfig
-from control.trajectory import make_traj
+from control.trajectory import make_traj, trajectory_duration
 from control.pid import PIDController
 from excite.guardian import Guardian
 from excite.signals import (default_segments, extended_segments, extreme_segments,
@@ -54,7 +54,7 @@ LOOP_HZ = 100
 KP = 8.0
 KI = 1.0
 KD = 2.5
-LIMIT = 400.0
+LIMIT = 600
 DEADBAND = 0.2
 ALPHA = 0.3
 
@@ -88,7 +88,11 @@ def parse_args() -> argparse.Namespace:
     p.add_argument("--fourier-harmonics", type=int, default=5, help="Fourier 谐波数")
     p.add_argument("--fourier-fmax", type=float, default=0.5, help="Fourier 最高频率 Hz")
     p.add_argument("--seed", type=int, default=0, help="随机轨迹 seed（可复现）")
-    p.add_argument("--duration", type=float, default=30.0, help="运行时长 s（默认 30）")
+    p.add_argument("--grid", nargs=6, type=float,
+                   metavar=("FB_MIN", "FB_MAX", "LR_MIN", "LR_MAX", "STEP", "DUR"),
+                   help="2D 网格驻留（蛇形，覆盖工作空间；稳态前馈拟合用）")
+    p.add_argument("--duration", type=float, default=None,
+                   help="运行时长 s（缺省：grid/waypoints/speed-ladder 自动=轨迹总时长，否则 30）")
     p.add_argument("--ip", default="10.1.1.198", help="动捕服务器 IP")
     p.add_argument("--servo-port", default=None, help="舵机串口（真实模式必填）")
     p.add_argument("--calibration", default=None, help="标定 JSON（缺省用默认映射）")
@@ -106,6 +110,9 @@ def parse_args() -> argparse.Namespace:
     p.add_argument("--kd", type=float, default=2.5, help="PID 微分增益")
     p.add_argument("--deadband", type=float, default=0.2, help="PID 死区（度）")
     p.add_argument("--alpha", type=float, default=0.3, help="反馈低通系数")
+    p.add_argument("--limit", type=float, default=600.0, help="PID 输出限幅（offset）")
+    p.add_argument("--baseline-pid-config", default=None,
+                   help="A/B baseline 段 PID 参数 JSON；缺省=与段1 同（段1 PID 由 --controller-config 携带）")
     p.add_argument("--rb", type=int, default=0, help="动捕刚体索引")
     p.add_argument("--no-imu", action="store_true", help="不采集 IMU")
     p.add_argument("--no-force", action="store_true", help="不采集力传感器")
@@ -133,6 +140,9 @@ class Orchestrator:
     def __init__(self, args: argparse.Namespace):
         self._args = args
         self._traj = make_traj(args)
+        # 时长：显式 --duration 优先；否则 grid/waypoints 取轨迹全长，其余 30s
+        self._duration = (args.duration if args.duration is not None
+                          else (trajectory_duration(args) or 30.0))
         self._segment_id = args.segment_id
         self._phase = CollectionPhase.EXPLORATION
         self._calib = Calibration.load(args.calibration) if args.calibration else Calibration.default()
@@ -140,6 +150,11 @@ class Orchestrator:
                             if args.controller_config else ControllerConfig.none())
         self._baseline_controller = (ControllerConfig.load(args.baseline_controller_config)
                                      if args.baseline_controller_config else None)
+        # 段1 PID 由 --controller-config 携带；段0 优先 --baseline-pid-config，
+        # 其次 --baseline-controller-config 内嵌 pid，最后回落段1。
+        self._pid = self._load_pid(args.controller_config)
+        _base_pid_src = args.baseline_pid_config or args.baseline_controller_config
+        self._baseline_pid = self._load_pid(_base_pid_src) if _base_pid_src else self._pid
 
         self._stop_event = threading.Event()
         self._q_mocap = queue.Queue(maxsize=QUEUE_MAXSIZE)
@@ -157,6 +172,24 @@ class Orchestrator:
         self._guardian = None
 
     # ------------------------------------------------------------------
+
+    def _load_pid(self, config_path: str | None = None) -> dict:
+        """从 CLI 标志 + 可选 JSON 合并 PID 参数（JSON 内嵌 kp/ki/kd/deadband/alpha/limit 覆盖 CLI）。
+
+        统一 controller 配置文件同时携带前馈（gain_poly/gain_cross/...）+ PID 字段，
+        故无需独立的 --pid-config；需要改 PID 就改对应 controller 文件。
+        """
+        base = {
+            "kp": self._args.kp, "ki": self._args.ki, "kd": self._args.kd,
+            "deadband": self._args.deadband, "alpha": self._args.alpha,
+            "limit": self._args.limit,
+        }
+        if config_path:
+            data = json.loads(Path(config_path).read_text(encoding="utf-8-sig"))
+            for k in base:
+                if k in data:
+                    base[k] = float(data[k])
+        return base
 
     def run(self) -> int:
         args = self._args
@@ -238,16 +271,17 @@ class Orchestrator:
                 base_ctrl = self._baseline_controller
                 logger.info("A/B 对照：段0 baseline(%s) + 段1 前馈",
                             "u_ff=0" if base_ctrl is None else "上一轮优化参数")
-                self._run_control_loop(args.duration, segment_id=0,
-                                       controller=base_ctrl or ControllerConfig.none())
+                self._run_control_loop(self._duration, segment_id=0,
+                                       controller=base_ctrl or ControllerConfig.none(),
+                                       pid=self._baseline_pid)
                 self._settle_neutral(args.inter_segment_settle)  # 段间回正
-                self._run_control_loop(args.duration, segment_id=1,
-                                       controller=self._controller)
+                self._run_control_loop(self._duration, segment_id=1,
+                                       controller=self._controller, pid=self._pid)
             else:
                 mode = "mock" if args.mock else ("dry-run" if args.dry_run else f"串口 {args.servo_port}")
                 logger.info("闭环采集启动（%dHz），模式=%s，时长 %.0fs",
-                            LOOP_HZ, mode, args.duration)
-                self._run_control_loop(args.duration)
+                            LOOP_HZ, mode, self._duration)
+                self._run_control_loop(self._duration)
 
             # 8. 收尾：回中位
             logger.info("收尾：回中位 (offset=0, offset=0)")
@@ -335,11 +369,12 @@ class Orchestrator:
             time.sleep(0.05)
 
     def _run_control_loop(self, duration_s: float, segment_id: int | None = None,
-                          controller=None) -> None:
-        pid_fb = PIDController(kp=self._args.kp, ki=self._args.ki, kd=self._args.kd, limit=LIMIT,
-                               deadband=self._args.deadband, alpha=self._args.alpha)
-        pid_lr = PIDController(kp=self._args.kp, ki=self._args.ki, kd=self._args.kd, limit=LIMIT,
-                               deadband=self._args.deadband, alpha=self._args.alpha)
+                          controller=None, pid: dict | None = None) -> None:
+        p = pid or self._pid
+        pid_fb = PIDController(kp=p["kp"], ki=p["ki"], kd=p["kd"], limit=p["limit"],
+                               deadband=p["deadband"], alpha=p["alpha"])
+        pid_lr = PIDController(kp=p["kp"], ki=p["ki"], kd=p["kd"], limit=p["limit"],
+                               deadband=p["deadband"], alpha=p["alpha"])
 
         t0 = time.perf_counter()
         dt = 1.0 / LOOP_HZ
@@ -575,22 +610,19 @@ class Orchestrator:
                 "baseline_controller_config": self._args.baseline_controller_config,
                 "controller": {
                     "gain_poly": self._controller.gain_poly,
+                    "gain_cross": self._controller.gain_cross,
                     "direction_gains": self._controller.direction_gains,
                     "slew_limit": self._controller.slew_limit,
                     "hysteresis": self._controller.hysteresis,
                 },
                 "servo_port": self._args.servo_port,
                 "force_port": self._args.force_port,
-                "duration": self._args.duration,
+                "duration": self._duration,
                 "ab": self._args.ab,
                 "inter_segment_settle": self._args.inter_segment_settle,
-                "pid": {
-                    "kp": self._args.kp,
-                    "ki": self._args.ki,
-                    "kd": self._args.kd,
-                    "deadband": self._args.deadband,
-                    "alpha": self._args.alpha,
-                },
+                "pid": self._pid,
+                "baseline_pid": self._baseline_pid,
+                "baseline_pid_config": self._args.baseline_pid_config,
             },
         }
         self._session.metadata_json.write_text(
@@ -601,7 +633,7 @@ class Orchestrator:
 
 def _trajectory_info(args) -> dict:
     """从 args 提取轨迹类型 + 参数。"""
-    for name in ("circle", "hold", "lissajous", "eight", "variable_circle", "waypoints"):
+    for name in ("circle", "hold", "lissajous", "eight", "variable_circle", "waypoints", "grid"):
         val = getattr(args, name, None)
         if val is not None:
             return {"type": name, "params": val}

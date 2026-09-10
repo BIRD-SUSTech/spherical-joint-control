@@ -2,7 +2,7 @@
 
 - 一阶低通（alpha）→ 死区 + 静止判断 → 输出锁定（防抖）→ PID + 积分限幅。
 - 积分/微分按"每拍"累计（不乘 dt），因此调用频率必须恒定（loop.py 为 100Hz）。
-- 输出单位 = offset（int16，限幅 ±limit，默认 400，对应 example_code 的 LM）。
+- 输出单位 = offset（int16，限幅 ±limit，默认 600，对应 example_code 的 LM）。
 """
 
 from __future__ import annotations
@@ -14,10 +14,10 @@ class PIDController:
         kp: float = 8.0,
         ki: float = 1.0,
         kd: float = 2.5,
-        limit: float = 400.0,
+        limit: float = 600.0,
         deadband: float = 0.2,
         alpha: float = 0.3,
-        integral_range: float = 400.0,
+        integral_range: float = 600.0,
         lock_velocity: float = 0.5,
         lock_count: int = 5,
     ):

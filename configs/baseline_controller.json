@@ -1,0 +1,9 @@
+{
+  "_note": "A/B baseline（纯 PID，u_ff=0）：旧默认增益 KP8/KI1.0/KD2.5。段0 用（--baseline-pid-config）。",
+  "kp": 5.0,
+  "ki": 0.8,
+  "kd": 0.1,
+  "deadband": 0.2,
+  "alpha": 0.3,
+  "limit": 600.0
+}
