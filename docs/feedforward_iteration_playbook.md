@@ -11,8 +11,10 @@
 - **新命名**：`calibrations/rig2.json`（标定）、`configs/rig2_v*.json`（前馈）。
 - **安全铁律**：新舵机更强 → 真实增益更大 → 用旧增益做开环会超调。开环前必须先 M3 标定，
   `rig2.json` 增益为 null 时 orchestrator 拒绝开环（已实现护栏）。
-- **本轮目标**：**稳态前馈**（g(q) + gain_cross + 收敛段精化 + 大角度滚雪球）。动态前馈
-  （迟滞/摩擦/速度）**暂缓**——待稳态前馈 A/B 收敛后再讨论。
+- **本轮目标**：**稳态前馈**（g(q) + gain_cross + 收敛段精化 + 大角度滚雪球）✅ 已收敛；
+  随后转**学习型动态前馈**（设计文档 §8.4，D0–D3 路线）。
+- **rig2 稳态收敛证据**：g(q) ±40° merge（circle30 A/B fb −66.5%/lr −74.3%）；级1.6 gain_cross
+  经**真 2D 覆盖 + 实机 A/B 否决**（小量近奇函数，两轴劣 +8~11%）；静态残余补偿无收益。
 - **工作空间**：从 M3 起覆盖 **±40°**（旧 rig 为 ±20°）。大角度开环用渐进滚雪球 +
   割线增益校正（`model.measure_gain` + `--gain-fb/--gain-lr`），防增益爬升导致 offset
   超调、逼近 guardian 70°。
@@ -155,3 +157,43 @@ M0 归档旧实现 → M1 L0+L3 最小闭环 → M2 L1 采集 → M3 标定+base
 2. 稳态口径（t>5s）为主，全段口径参考（启动瞬态污染）；
 3. session_metadata.json 自动记录 config（轨迹/标定/前馈系数），数据可复现；
 4. 每轮数据归档 NAS `M*_verification/data/`，报告留 commit hash。
+
+---
+
+## 四、学习型动态前馈 SOP（§8.4，D0–D3）
+
+### 铁律（比稳态更严，因为学习型更容易自欺）
+
+1. **残差式输出**：`u_ff = g_static(q_d) + 学习修正`。静态基座固定不训练，修正置零=当前基线。
+2. **纯前馈**：模型输入只用**解析参考量** `q_d, q̇_d`（零噪声）；不用实测（那是状态反馈，另论）。
+3. **监督目标是状态→u_总**：收敛段 `u_总 ≈ 目标状态所需 u`；**绝不**用"误差→u"（否则学到 PID 本身）。
+4. **激励必须张成被拟合空间**：圆是 1D 流形→退化（级1.6 已踩）；速度必须**阶梯变化**（否则
+   `Kv·q̇` 与 `Kc·sign(q̇)` 共线）。
+5. **离线指标不作判据**：留出 RMSE 只衡量拟合优度（级1.6 离线 −7.5% 通过、实机反劣 +8~11%）
+   → **只信实机 A/B**，且留出要按**轨迹**留出（考泛化）。
+6. **A/B 隔离唯一变量**：`g_static` 系数两段完全相同，唯一变量只是学习修正项。
+
+### D0 采集设施
+
+```powershell
+# 速度阶梯（同幅度多频率）——覆盖 |q̇| 区间
+python -m collect.orchestrator --speed-ladder 20 --speeds 0.05 0.1 0.2 0.4 --duration 160 `
+  --servo-port COM5 --force-port COM3 --calibration calibrations/rig2.json `
+  --controller-config configs/static_feedforward_controller.json --startup-fade 1.0
+# 随机富轨迹（多频 Fourier）——(q,q̇) 空间覆盖
+python -m collect.orchestrator --random-fourier 20 --duration 180 ... 同上
+```
+
+### D1 残差 MLP
+
+```powershell
+python -m model.fit_dynamic_nn --session <速度阶梯会话> <随机轨迹会话> ... `
+  --base-config configs/static_feedforward_controller.json `
+  --out configs/dynamic_nn_v1.json --epochs 300
+# A/B（隔离唯一变量：g_static 相同，段1 多一个学习修正）
+python -m collect.orchestrator --ab --variable-circle 20 10 --duration 60 `
+  --controller-config configs/dynamic_nn_v1.json `
+  --baseline-controller-config configs/static_feedforward_controller.json `
+  --servo-port COM5 --force-port COM3 --calibration calibrations/rig2.json --startup-fade 1.0
+python -m valuation.evaluate <会话> --ab
+```

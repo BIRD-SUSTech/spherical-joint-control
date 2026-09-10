@@ -78,6 +78,16 @@ def parse_args() -> argparse.Namespace:
                    help="变速圆（快慢交替）")
     p.add_argument("--waypoints", nargs="+", type=float, metavar="FB LR DUR",
                    help="点到点（fb lr dur 循环，多组）")
+    p.add_argument("--speed-ladder", type=float, metavar="AMP_DEG",
+                   help="速度阶梯（§8.4 D0）：同幅度依次跑多频率，覆盖 |q̇| 区间")
+    p.add_argument("--speeds", nargs="+", type=float, default=[0.05, 0.1, 0.2, 0.4],
+                   help="速度阶梯频率序列 Hz（默认 0.05 0.1 0.2 0.4）")
+    p.add_argument("--speed-seg-dur", type=float, default=40.0, help="速度阶梯每档时长 s")
+    p.add_argument("--random-fourier", type=float, metavar="AMP_DEG",
+                   help="随机多频 Fourier 轨迹（§8.4 D0）：(q,q̇) 覆盖最大化")
+    p.add_argument("--fourier-harmonics", type=int, default=5, help="Fourier 谐波数")
+    p.add_argument("--fourier-fmax", type=float, default=0.5, help="Fourier 最高频率 Hz")
+    p.add_argument("--seed", type=int, default=0, help="随机轨迹 seed（可复现）")
     p.add_argument("--duration", type=float, default=30.0, help="运行时长 s（默认 30）")
     p.add_argument("--ip", default="10.1.1.198", help="动捕服务器 IP")
     p.add_argument("--servo-port", default=None, help="舵机串口（真实模式必填）")

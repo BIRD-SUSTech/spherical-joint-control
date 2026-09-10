@@ -8,6 +8,8 @@
     - direction_gains：方向分段增益（级 1，已实现）
     - gain_poly：参数化逆映射 g(q) 系数（级 1.5，已实现）
     - gain_cross：几何耦合解耦交叉项 c(q_other)（级 1.6，已实现，加性）
+    - dynamic_nn：学习型动态残差 MLP（§8.4 D1，已实现）——**残差式**：
+      u_ff = g_static(q_d) + f_θ(q_d, q̇_d)；缺省/权重置零即精确退回纯稳态前馈。
     - hysteresis：迟滞补偿（级 2，预留）
     - friction：摩擦补偿（级 3，预留）
 """
@@ -15,6 +17,7 @@
 from __future__ import annotations
 
 import json
+import math
 from dataclasses import dataclass, field
 from pathlib import Path
 
@@ -24,6 +27,7 @@ class ControllerConfig:
     direction_gains: dict | None = None   # {"fb": {"pos","neg"}, "lr": {"pos","neg"}}
     gain_poly: dict | None = None         # {"fb": [b0,b1,b2,b3], "lr": [...]} 逆映射 g(q_self)
     gain_cross: dict | None = None        # {"fb": [c1..], "lr": [c1..]} 交叉项 c(q_other)，无常数项
+    dynamic_nn: dict | None = None        # 动态残差 MLP（§8.4 D1）：归一化参数 + 层权重
     slew_limit: float | None = None       # u_ff 每拍变化上限（offset/拍），None=不限
     hysteresis: dict | None = None        # {"fb": h, "lr": h} 迟滞补偿（offset），级 2
     # 未来扩展字段在此追加，load 时读取对应 key
@@ -45,6 +49,7 @@ class ControllerConfig:
             direction_gains=data.get("direction_gains"),
             gain_poly=data.get("gain_poly"),
             gain_cross=data.get("gain_cross"),
+            dynamic_nn=data.get("dynamic_nn"),
             slew_limit=data.get("slew_limit"),
             hysteresis=data.get("hysteresis"),
         )
@@ -52,7 +57,7 @@ class ControllerConfig:
     def has_feedforward(self) -> bool:
         """是否启用前馈。"""
         return (self.direction_gains is not None or self.gain_poly is not None
-                or self.gain_cross is not None)
+                or self.gain_cross is not None or self.dynamic_nn is not None)
 
     def feedforward(self, q_d_fb: float, q_d_lr: float,
                     qdot_d_fb: float = 0.0, qdot_d_lr: float = 0.0) -> tuple[float, float]:
@@ -76,6 +81,13 @@ class ControllerConfig:
             u_fb += _poly_no_const(self.gain_cross["fb"], q_d_lr)  # fb 输出受 lr 角影响
             u_lr += _poly_no_const(self.gain_cross["lr"], q_d_fb)  # lr 输出受 fb 角影响
 
+        # §8.4 D1：学习型动态残差（**残差式**，只加修正量；缺省/零权重=退回稳态前馈）
+        if self.dynamic_nn is not None:
+            r_fb, r_lr = _nn_forward(self.dynamic_nn,
+                                     [q_d_fb, q_d_lr, qdot_d_fb, qdot_d_lr])
+            u_fb += r_fb
+            u_lr += r_lr
+
         # 级 2：迟滞补偿 h·sign(q̇_d)
         if self.hysteresis is not None:
             u_fb += self.hysteresis.get("fb", 0.0) * (1.0 if qdot_d_fb >= 0 else -1.0)
@@ -98,6 +110,30 @@ def _poly(coeffs, x):
 def _poly_no_const(coeffs, x) -> float:
     """无常数项多项式求值 u = c1·x + c2·x² + ...（coeffs[0] 对应 x¹）。"""
     return sum(c * x ** (k + 1) for k, c in enumerate(coeffs))
+
+
+def _nn_forward(nn: dict, features: list[float]) -> tuple[float, float]:
+    """动态残差 MLP 前向（纯 Python，运行时无 torch 依赖）。
+
+    nn 结构：{"in_mean","in_std","out_mean","out_std","layers":[{"W","b"}...],"act","clip"}
+    输入先标准化 → 逐层 (act 除末层) → 输出去标准化 → 按 clip 限幅（防外推发散）。
+    """
+    x = [(f - m) / (s if s else 1.0) for f, m, s in zip(features, nn["in_mean"], nn["in_std"])]
+    layers = nn["layers"]
+    act = nn.get("act", "tanh")
+    for i, layer in enumerate(layers):
+        W, b = layer["W"], layer["b"]
+        x = [sum(w * xi for w, xi in zip(row, x)) + bi for row, bi in zip(W, b)]
+        if i < len(layers) - 1:
+            if act == "tanh":
+                x = [math.tanh(v) for v in x]
+            elif act == "relu":
+                x = [v if v > 0.0 else 0.0 for v in x]
+    out = [v * s + m for v, m, s in zip(x, nn["out_mean"], nn["out_std"])]
+    clip = nn.get("clip")
+    if clip is not None:
+        out = [max(-clip, min(clip, v)) for v in out]
+    return out[0], out[1]
 
 
 def _slew(prev: float, cur: float, limit: float) -> float:
