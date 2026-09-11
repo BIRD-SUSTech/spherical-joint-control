@@ -68,41 +68,47 @@ def load_session_features(csv_path: Path, cfg: ControllerConfig, threshold: floa
     残差 r = u_总 − g_static(q_d) 即"静态前馈没吃掉的动态量"。
     include_all=True 时不筛收敛段（供对照）。
     """
-    segs_data: dict[int, list] = {}
+    # 先收集【全部】行并按时间排序：参考速度必须在【连续】时间序列上求。
+    # （若先滤掉非收敛样本再求梯度，序列出现空洞却仍按均匀 dt 差分 → 跨洞处产生
+    #  上千 °/s 的伪峰，实测可达 1967°/s，而物理上限仅约 63°/s。）
+    rows_all: dict[int, list] = {}
     with open(csv_path, newline="", encoding="utf-8") as f:
         for row in csv.DictReader(f):
             sid = row.get("segment_id", "")
             if sid in ("", "-1", None):
                 continue
             try:
+                ts = float(row["t_s"])
                 tf = float(row["target_front_back_deg"])
                 tl = float(row["target_left_right_deg"])
                 cf = float(row["current_front_back_deg"])
                 cl = float(row["current_left_right_deg"])
                 uf = float(row["servo_front_back_offset"])
                 ul = float(row["servo_left_right_offset"])
-                ts = float(row["t_s"])
             except (KeyError, ValueError):
                 continue
-            if not include_all and (abs(cf - tf) >= threshold or abs(cl - tl) >= threshold):
-                continue
-            segs_data.setdefault(int(sid), []).append((ts, tf, tl, uf, ul))
+            rows_all.setdefault(int(sid), []).append((ts, tf, tl, cf, cl, uf, ul))
 
     feats, res, seg_ids = [], [], []
-    for sid, rows in segs_data.items():
+    for sid, rows in rows_all.items():
         if len(rows) < 3:
             continue
         rows.sort(key=lambda r: r[0])
         ts = np.array([r[0] for r in rows])
         tf = np.array([r[1] for r in rows])
         tl = np.array([r[2] for r in rows])
-        uf = np.array([r[3] for r in rows])
-        ul = np.array([r[4] for r in rows])
-        # 解析参考速度：目标平滑 → 差分干净（不是实测差分）
+        cf = np.array([r[3] for r in rows])
+        cl = np.array([r[4] for r in rows])
+        uf = np.array([r[5] for r in rows])
+        ul = np.array([r[6] for r in rows])
+        # 参考速度：在【全序列】上差分（目标平滑 → 干净，且不是实测差分）
         dt = np.median(np.diff(ts)) if len(ts) > 1 else 0.01
         vf = np.gradient(tf, dt)
         vl = np.gradient(tl, dt)
         for i in range(len(ts)):
+            if not include_all and (abs(cf[i] - tf[i]) >= threshold
+                                    or abs(cl[i] - tl[i]) >= threshold):
+                continue
             bf, bl = base_static_u(cfg, tf[i], tl[i])
             feats.append([tf[i], tl[i], vf[i], vl[i]])
             res.append([uf[i] - bf, ul[i] - bl])

@@ -3,6 +3,13 @@
 通道映射（新硬件 rig2 确认）：ch1–ch4 = 4 根缆的张力（共模预紧标定 §8.3.2 只用这 4 个），
 ch5/ch6 不用。ch1..ch4 与协议 CH1..CH4（4 个舵机）的【物理缆对应关系】在 M3 力标定时
 用单缆阶跃实测确认（不猜测）。
+
+速率（提速后默认）：baudrate=**19200（不改）**、channel_count=4、**sample_interval_ms=0**
+    → 周期 = max(读取耗时, 间隔)，间隔 0 = 读多快就多快（受传感器响应封顶）。
+    读取耗时估算：4 通道 8 寄存器，请求 8B + 响应 21B = 29B @19200 ≈ **15ms** 线时间
+    + 传感器响应延迟 → 预估 **~30-60 Hz**（原实现 6ch/100ms 附加 sleep：实测 8.25 Hz、间隔 121ms）。
+    采集后请核对 `session_metadata.json` 的 `force.rate_hz` 与 `force.error_count`
+    判断是否真的提上去了 / 是否有通信错误。
 """
 
 from __future__ import annotations
@@ -35,9 +42,9 @@ class ForceCollector:
         rs485_tx_level: bool = True,
         slave_address: int = 0x01,
         reg_start_address: int = 0x000B,
-        channel_count: int = 6,
+        channel_count: int = 4,
         scale_factor: float = 1.0,
-        sample_interval_ms: int = 100,
+        sample_interval_ms: int = 0,
     ):
         self._output_queue = output_queue
         self._stop_event = stop_event
@@ -59,6 +66,9 @@ class ForceCollector:
         self._client = None
         self._dropped_count = 0
         self._error_count = 0
+        self._sample_count = 0
+        self._t_first = None
+        self._t_last = None
 
     def start(self) -> None:
         from .modbus import ModbusClient  # 惰性，mock 不依赖 pyserial
@@ -100,10 +110,20 @@ class ForceCollector:
     def error_count(self) -> int:
         return self._error_count
 
+    @property
+    def rate_hz(self) -> float:
+        """实测平均采样率（按首末样本的 wall-clock 间隔算）。"""
+        if self._t_first is None or self._t_last is None or self._t_last <= self._t_first:
+            return 0.0
+        return (self._sample_count - 1) / (self._t_last - self._t_first)
+
     def _loop(self) -> None:
         from .modbus import ModbusException
 
-        interval_s = max(0.05, self._sample_interval_ms / 1000.0)
+        # 定周期调度：周期 = max(读取耗时, interval_s)；interval=0 → 读多快就多快（传感器极限）。
+        # （旧实现是"读耗时 + sleep(interval)"，固定 50ms 下限会白白吃掉一半带宽。）
+        interval_s = max(0.0, self._sample_interval_ms / 1000.0)
+        next_t = time.perf_counter()
         while not self._stop_event.is_set():
             try:
                 raw = self._client.read_32bit_values(
@@ -118,6 +138,11 @@ class ForceCollector:
                     ch1=padded[0], ch2=padded[1], ch3=padded[2],
                     ch4=padded[3], ch5=padded[4], ch6=padded[5],
                 )
+                now = time.perf_counter()
+                if self._t_first is None:
+                    self._t_first = now
+                self._t_last = now
+                self._sample_count += 1
                 try:
                     self._output_queue.put_nowait(data)
                 except queue.Full:
@@ -125,5 +150,11 @@ class ForceCollector:
             except ModbusException:
                 self._error_count += 1
                 time.sleep(0.05)
+                next_t = time.perf_counter()  # 出错后重新对齐周期
                 continue
-            time.sleep(interval_s)
+            next_t += interval_s
+            sleep_s = next_t - time.perf_counter()
+            if sleep_s > 0:
+                time.sleep(sleep_s)
+            else:
+                next_t = time.perf_counter()  # 读取本身已超周期，重新对齐（不累积相位）

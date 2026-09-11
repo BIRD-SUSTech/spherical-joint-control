@@ -34,7 +34,7 @@ logger = logging.getLogger(__name__)
 
 FORCE_SLAVE = 0x01
 FORCE_REG_START = 0x000B
-FORCE_CHANNELS = 6
+FORCE_CHANNELS = 4  # 只读 ch1-ch4（四缆张力），帧更短、更快
 
 FIELDS = ["axis", "target_deg", "offset", "q_fb", "q_lr",
           "ch1_med", "ch2_med", "ch3_med", "ch4_med",
@@ -120,7 +120,7 @@ def main() -> int:
         return 1
     else:
         from collect.sensors.modbus import ModbusClient
-        force_client = ModbusClient(port=args.force_port, baudrate=19200, timeout=0.5)
+        force_client = ModbusClient(port=args.force_port, timeout=0.5)  # 波特率走默认（19200）
 
     guardian = Guardian(mocap, bus, calib, args.limit_deg)
     guardian.start()

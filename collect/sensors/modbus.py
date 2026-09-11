@@ -7,7 +7,6 @@
 from __future__ import annotations
 
 import struct
-import time
 
 _EXCEPTION_CODES = {
     0x01: "非法功能码",
@@ -111,7 +110,8 @@ class ModbusClient:
             self._set_tx(False)
         else:
             self._ser.write(frame)
-            time.sleep(0.02)
+        # 不做固定 sleep 等响应：ser.read(n) 本身按 timeout 阻塞到收齐 n 字节，
+        # 等响应的时间由传感器响应延迟决定（此前固定 sleep(0.02) 是纯冗余开销）。
 
         header = self._ser.read(2)
         if len(header) < 2:

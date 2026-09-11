@@ -52,7 +52,7 @@ PAIR_FORCE_IDX = {"front_back": (0, 2), "left_right": (1, 3)}
 
 FORCE_SLAVE = 0x01
 FORCE_REG_START = 0x000B
-FORCE_CHANNELS = 6
+FORCE_CHANNELS = 4  # 只读 ch1-ch4（四缆张力），帧更短、更快
 
 
 def parse_args() -> argparse.Namespace:
@@ -261,7 +261,7 @@ def main() -> int:
         return 1
     else:
         from collect.sensors.modbus import ModbusClient
-        force_client = ModbusClient(port=args.force_port, baudrate=19200, timeout=0.5)
+        force_client = ModbusClient(port=args.force_port, timeout=0.5)  # 波特率走默认（19200）
 
     # guardian
     guardian = Guardian(mocap, bus, calib, args.limit_deg)

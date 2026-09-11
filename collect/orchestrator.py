@@ -121,6 +121,12 @@ def parse_args() -> argparse.Namespace:
     p.add_argument("--no-imu", action="store_true", help="不采集 IMU")
     p.add_argument("--no-force", action="store_true", help="不采集力传感器")
     p.add_argument("--force-port", default=None, help="力传感器串口（启用采集时必填）")
+    p.add_argument("--force-baud", type=int, default=19200,
+                   help="力传感器波特率（默认 19200，与硬件一致；不改）")
+    p.add_argument("--force-interval-ms", type=int, default=0,
+                   help="力采样间隔 ms（默认 0=读多快就多快，周期=max(读取耗时,间隔)）")
+    p.add_argument("--force-channels", type=int, default=4,
+                   help="力传感器读取通道数（默认 4=只用 ch1-ch4 四缆张力）")
     p.add_argument("--out", default="collect/logs", help="会话根目录")
     p.add_argument("--segment-id", type=int, default=0, help="闭环数据段 id（默认 0）")
     p.add_argument("--open-loop", action="store_true", help="开环激励模式（替代闭环）")
@@ -248,7 +254,10 @@ class Orchestrator:
                 else:
                     try:
                         self._force = ForceCollector(self._q_force, self._stop_event,
-                                                     serial_port=args.force_port)
+                                                     serial_port=args.force_port,
+                                                     baudrate=args.force_baud,
+                                                     sample_interval_ms=args.force_interval_ms,
+                                                     channel_count=args.force_channels)
                         self._force.start()
                     except Exception:
                         logger.exception("力传感器启动失败，跳过力采集")
@@ -600,6 +609,15 @@ class Orchestrator:
             dropped["imu"] = self._imu.dropped_count
         if self._force:
             dropped["force"] = self._force.dropped_count
+        force_stats = None
+        if self._force:
+            force_stats = {
+                "baudrate": self._args.force_baud,
+                "interval_ms": self._args.force_interval_ms,
+                "channels": self._args.force_channels,
+                "error_count": self._force.error_count,
+                "rate_hz": round(self._force.rate_hz, 2),
+            }
         metadata = {
             "session_dir": str(self._session.dir),
             "started_at": datetime.now().isoformat(),
@@ -607,6 +625,7 @@ class Orchestrator:
             "segment_id": self._segment_id,
             "row_counts": row_counts,
             "dropped_frames": dropped,
+            "force": force_stats,
             "config": {
                 "trajectory": _trajectory_info(self._args),
                 "calibration": self._args.calibration,
@@ -637,7 +656,8 @@ class Orchestrator:
 
 def _trajectory_info(args) -> dict:
     """从 args 提取轨迹类型 + 参数。"""
-    for name in ("circle", "hold", "lissajous", "eight", "variable_circle", "waypoints", "grid"):
+    for name in ("circle", "hold", "lissajous", "eight", "variable_circle", "waypoints", "grid",
+                 "speed_ladder", "random_fourier"):
         val = getattr(args, name, None)
         if val is not None:
             return {"type": name, "params": val}
