@@ -272,3 +272,27 @@ python -m valuation.evaluate <会话> --ab
 python -m valuation.phase_report <会话> --reversal --json
 # 判据：三轨迹两轴 MAE/RMSE 不劣于基线；换向过冲/等效延迟不恶化
 # 通过后可选细化：τ 按 q̇ 符号分正负（c⁺/c⁻，覆盖摩擦不对称）
+
+# ============================================================
+# D5：slew20 干净标签上的 NN 动态前馈（v3，权重存 npz）
+# ============================================================
+# 数据：重采的干净 D0 四会话（200340/200639/200928/201038，超限 0.0%、corr(标签,缺口)=0.000）
+# 两个候选（**基座不同**，权重都在 .npz，JSON 仅留引用）：
+#   A) configs/dynamic_nn_v3.json        = g(q_d+τ·q̇_d) + NN   ← 推荐（速度前馈已是基座）
+#      离线：基座残余 RMSE fb 17.00/lr 24.43 → NN 后 7.87/8.00
+#   B) configs/dynamic_nn_v3_static.json = g_static(q_d) + NN   ← 对照（跳过 τ 项）
+#      离线：53.00/53.30 → 11.10/11.53
+# ⚠️ 两者离线指标**不可比**（基座残余不同）；唯一可比的是**实机 A/B**，且须与各自基座对跑。
+# 判据：≥3 轨迹（含 Eight）两轴 MAE/RMSE 不劣于各自基座；换向过冲/等效延迟不恶化
+
+# A) v3（速度前馈 + NN）vs 其基座（速度前馈）
+python -m collect.orchestrator --ab --eight 20 10 --duration 60 --servo-port COM5 --force-port COM3 --calibration calibrations/rig2.json --controller-config configs/dynamic_nn_v3.json --baseline-controller-config configs/static_feedforward_lead_controller.json --startup-fade 1.0
+python -m collect.orchestrator --ab --lissajous 20 20 0.1 0.16 --duration 60 (同上)
+python -m collect.orchestrator --ab --variable-circle 20 10 --duration 60 (同上)
+
+# B) v3_static（纯静态 + NN）vs 静态基线
+python -m collect.orchestrator --ab --eight 20 10 --duration 60 --servo-port COM5 --force-port COM3 --calibration calibrations/rig2.json --controller-config configs/dynamic_nn_v3_static.json --baseline-controller-config configs/static_feedforward_controller.json --startup-fade 1.0
+(同样再跑 lissajous / variable-circle)
+
+python -m valuation.evaluate <会话> --ab
+python -m valuation.phase_report <会话> --reversal --json

@@ -9,8 +9,9 @@
     - gain_poly：参数化逆映射 g(q) 系数（级 1.5，已实现）
     - gain_cross：几何耦合解耦交叉项 c(q_other)（级 1.6，已实现，加性）
     - velocity_lead：速度前馈（相位超前）τ，u_ff = g(q_d + τ·q̇_d)（§8.4，D0 实证主导项）
-    - dynamic_nn：学习型动态残差 MLP（§8.4 D1，已实现）——**残差式**：
-      u_ff = g_static(q_d) + f_θ(q_d, q̇_d)；缺省/权重置零即精确退回纯稳态前馈。
+    - dynamic_nn：学习型动态残差 MLP（§8.4，已实现）——**残差式**，权重置零=精确退回基座。
+      权重可**内联在 JSON**（dynamic_nn）或**存 npz**（dynamic_nn_npz，推荐：JSON 只留引用、
+      权重用二进制，避免 47KB JSON 嵌套列表）。
     - hysteresis：迟滞补偿（级 2，预留）
     - friction：摩擦补偿（级 3，预留）
 """
@@ -29,7 +30,8 @@ class ControllerConfig:
     gain_poly: dict | None = None         # {"fb": [b0,b1,b2,b3], "lr": [...]} 逆映射 g(q_self)
     gain_cross: dict | None = None        # {"fb": [c1..], "lr": [c1..]} 交叉项 c(q_other)，无常数项
     velocity_lead: dict | None = None     # {"fb": tau_s, "lr": tau_s} 速度前馈相位超前（秒）
-    dynamic_nn: dict | None = None        # 动态残差 MLP（§8.4 D1）：归一化参数 + 层权重
+    dynamic_nn: dict | None = None        # 动态残差 MLP（内联形式）：归一化参数 + 层权重
+    dynamic_nn_npz: str | None = None     # 动态残差 MLP 权重文件（npz）；load 时载入 dynamic_nn
     slew_limit: float | None = None       # u_ff 每拍变化上限（offset/拍），None=不限
     hysteresis: dict | None = None        # {"fb": h, "lr": h} 迟滞补偿（offset），级 2
     # 未来扩展字段在此追加，load 时读取对应 key
@@ -46,16 +48,25 @@ class ControllerConfig:
 
     @classmethod
     def load(cls, path: str | Path) -> "ControllerConfig":
-        data = json.loads(Path(path).read_text(encoding="utf-8"))
-        return cls(
+        cfg_path = Path(path)
+        data = json.loads(cfg_path.read_text(encoding="utf-8-sig"))
+        cfg = cls(
             direction_gains=data.get("direction_gains"),
             gain_poly=data.get("gain_poly"),
             gain_cross=data.get("gain_cross"),
             velocity_lead=data.get("velocity_lead"),
             dynamic_nn=data.get("dynamic_nn"),
+            dynamic_nn_npz=data.get("dynamic_nn_npz"),
             slew_limit=data.get("slew_limit"),
             hysteresis=data.get("hysteresis"),
         )
+        # npz 权重（推荐形式）：JSON 只留引用，载入时materialize成 dynamic_nn
+        if cfg.dynamic_nn is None and cfg.dynamic_nn_npz:
+            ref = Path(cfg.dynamic_nn_npz)
+            if not ref.is_absolute():
+                ref = cfg_path.parent / ref
+            cfg.dynamic_nn = load_nn_npz(ref)
+        return cfg
 
     def has_feedforward(self) -> bool:
         """是否启用前馈。"""
@@ -155,3 +166,49 @@ def _slew(prev: float, cur: float, limit: float) -> float:
     if abs(d) > limit:
         return prev + limit * (1 if d > 0 else -1)
     return cur
+
+
+def load_nn_npz(path: str | Path) -> dict:
+    """从 npz 载入动态残差 MLP 权重 → 与内联 dynamic_nn 同构的 dict。
+
+    npz 键：in_mean, in_std, out_mean, out_std, clip, n_in, features(可选), W0,b0,W1,b1,...
+    """
+    import numpy as np
+    z = np.load(path, allow_pickle=False)
+    layers = []
+    i = 0
+    while f"W{i}" in z.files:
+        layers.append({"W": z[f"W{i}"].tolist(), "b": z[f"b{i}"].tolist()})
+        i += 1
+    out = {
+        "in_mean": z["in_mean"].tolist(), "in_std": z["in_std"].tolist(),
+        "out_mean": z["out_mean"].tolist(), "out_std": z["out_std"].tolist(),
+        "layers": layers, "act": str(z["act"]) if "act" in z.files else "tanh",
+        "clip": float(z["clip"]), "n_in": int(z["n_in"]),
+        "_npz": str(path),
+    }
+    if "features" in z.files:
+        out["features"] = [str(x) for x in z["features"]]
+    return out
+
+
+def save_nn_npz(path: str | Path, nn: dict) -> None:
+    """把 dynamic_nn dict 写入 npz（权重二进制，JSON 不再内联大数组）。"""
+    import numpy as np
+    arrs = {
+        "in_mean": np.asarray(nn["in_mean"], dtype=np.float64),
+        "in_std": np.asarray(nn["in_std"], dtype=np.float64),
+        "out_mean": np.asarray(nn["out_mean"], dtype=np.float64),
+        "out_std": np.asarray(nn["out_std"], dtype=np.float64),
+        "clip": np.asarray(nn.get("clip", 0.0), dtype=np.float64),
+        "n_in": np.asarray(nn.get("n_in", len(nn["in_mean"])), dtype=np.int64),
+        "act": np.asarray(nn.get("act", "tanh")),
+    }
+    if nn.get("features"):
+        arrs["features"] = np.asarray(nn["features"])
+    for i, L in enumerate(nn["layers"]):
+        arrs[f"W{i}"] = np.asarray(L["W"], dtype=np.float64)
+        arrs[f"b{i}"] = np.asarray(L["b"], dtype=np.float64)
+    p = Path(path)
+    p.parent.mkdir(parents=True, exist_ok=True)
+    np.savez_compressed(p, **arrs)

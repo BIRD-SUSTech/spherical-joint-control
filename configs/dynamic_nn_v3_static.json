@@ -1,0 +1,25 @@
+{
+  "_note": "§8.4 动态残差 MLP（**残差式**）：u_ff = g_static(q_d)[基座固定] + f_θ(q_d,q̇_d,q̈_d) | 训练 4 会话（train-all）threshold=1.0° hidden=32 depth=2 epochs=400 | n_in=6 clip=594 | 基座配置=static_feedforward_controller.json | 权重在 dynamic_nn_v3_static.npz（JSON 不内联） | 权重置零=精确退回基座",
+  "gain_poly": {
+    "fb": [
+      -4.889534371163219,
+      11.745264320233275,
+      0.02395636757213193,
+      -0.0008749673985501971
+    ],
+    "lr": [
+      21.580865325073812,
+      13.230104751913913,
+      -0.013028844056233169,
+      -0.0016733449724934957
+    ]
+  },
+  "slew_limit": 20.0,
+  "kp": 3.0,
+  "ki": 0.5,
+  "kd": 0.1,
+  "deadband": 0.2,
+  "alpha": 0.3,
+  "limit": 600.0,
+  "dynamic_nn_npz": "dynamic_nn_v3_static.npz"
+}

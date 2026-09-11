@@ -45,15 +45,23 @@ def _poly_no_const(coeffs, x):
     return sum(c * x ** (k + 1) for k, c in enumerate(coeffs))
 
 
-def base_static_u(cfg: ControllerConfig, q_fb: float, q_lr: float) -> tuple[float, float]:
-    """静态基座 g_static（**不含** dynamic_nn，也不含迟滞）。"""
+def base_static_u(cfg: ControllerConfig, q_fb: float, q_lr: float,
+                  v_fb: float = 0.0, v_lr: float = 0.0) -> tuple[float, float]:
+    """基座前馈：g(q_d + τ·q̇_d)（含 velocity_lead 相位超前）。
+
+    **不含** dynamic_nn，也不含迟滞——NN 学的是"基座之后的残余"。
+    """
+    qe_fb, qe_lr = q_fb, q_lr
+    if cfg.velocity_lead is not None:
+        qe_fb += cfg.velocity_lead.get("fb", 0.0) * v_fb
+        qe_lr += cfg.velocity_lead.get("lr", 0.0) * v_lr
     if cfg.gain_poly is not None:
-        u_fb = _poly(cfg.gain_poly["fb"], q_fb)
-        u_lr = _poly(cfg.gain_poly["lr"], q_lr)
+        u_fb = _poly(cfg.gain_poly["fb"], qe_fb)
+        u_lr = _poly(cfg.gain_poly["lr"], qe_lr)
     elif cfg.direction_gains is not None:
         g = cfg.direction_gains
-        u_fb = q_fb / (g["fb"]["pos"] if q_fb >= 0 else g["fb"]["neg"])
-        u_lr = q_lr / (g["lr"]["pos"] if q_lr >= 0 else g["lr"]["neg"])
+        u_fb = qe_fb / (g["fb"]["pos"] if qe_fb >= 0 else g["fb"]["neg"])
+        u_lr = qe_lr / (g["lr"]["pos"] if qe_lr >= 0 else g["lr"]["neg"])
     else:
         u_fb = u_lr = 0.0
     if cfg.gain_cross is not None:
@@ -114,7 +122,7 @@ def load_session_features(csv_path: Path, cfg: ControllerConfig, threshold: floa
             if not include_all and (abs(cf[i] - tf[i]) >= threshold
                                     or abs(cl[i] - tl[i]) >= threshold):
                 continue
-            bf, bl = base_static_u(cfg, tf[i], tl[i])
+            bf, bl = base_static_u(cfg, tf[i], tl[i], vf[i], vl[i])
             if use_qddot:
                 feats.append([tf[i], tl[i], vf[i], vl[i], af[i], al[i]])
             else:
@@ -286,18 +294,27 @@ def main() -> int:
     clip = args.clip if args.clip is not None else float(3.0 * np.abs(R_tr).max())
     net_dict = export_nn(net, norm, clip)
 
-    data = json.loads(Path(args.base_config).read_text(encoding="utf-8"))
-    data["dynamic_nn"] = net_dict
-    data["_note"] = (f"§8.4 D1-v2 动态残差 MLP（含 q̈）| 训练会话 {len(paths)} 个"
-                     f"（{'train-all' if args.train_all else '留出会话'}），"
-                     f"threshold={args.threshold}° qddot={args.qddot} "
-                     f"hidden={args.hidden} depth={args.depth} epochs={args.epochs} | "
-                     f"n_in={net_dict['n_in']} clip={clip:.0f} | "
-                     f"基线=static_feedforward（g_static 固定不训练）")
+    from control.controller_config import save_nn_npz
     out = Path(args.out)
+    npz = out.with_suffix(".npz")
+    save_nn_npz(npz, net_dict)
+    data = json.loads(Path(args.base_config).read_text(encoding="utf-8-sig"))
+    data.pop("dynamic_nn", None)
+    data.pop("dynamic_nn_npz", None)
+    data["dynamic_nn_npz"] = npz.name          # 与配置文件同目录，用相对名（可移植）
+    base_has_lead = cfg.velocity_lead is not None
+    base_desc = "g(q_d+τ·q̇_d)" if base_has_lead else "g_static(q_d)"
+    data["_note"] = (
+        f"§8.4 动态残差 MLP（**残差式**）：u_ff = {base_desc}[基座固定] + f_θ(q_d,q̇_d"
+        f"{',q̈_d' if args.qddot else ''}) | "
+        f"训练 {len(paths)} 会话（{'train-all' if args.train_all else '留出'}）"
+        f"threshold={args.threshold}° hidden={args.hidden} depth={args.depth} epochs={args.epochs} | "
+        f"n_in={net_dict['n_in']} clip={clip:.0f} | 基座配置={Path(args.base_config).name} | "
+        f"权重在 {out.with_suffix('.npz').name}（JSON 不内联） | 权重置零=精确退回基座")
     out.parent.mkdir(parents=True, exist_ok=True)
     out.write_text(json.dumps(data, indent=2, ensure_ascii=False), encoding="utf-8")
-    print(f"\n已写: {out}（clip={clip:.0f} offset；含 base-config 的全部静态项）")
+    print(f"\n已写: {out}（JSON 仅 {out.stat().st_size} B，权重在 {npz.name}）")
+    print(f"      权重 npz: {npz}（{npz.stat().st_size/1024:.1f} KB）  clip={clip:.0f} offset")
     print("⚠️ 离线指标只衡量拟合优度，不作判据——merge 与否由实机 A/B 决定（§8.4.6）")
     return 0
 
