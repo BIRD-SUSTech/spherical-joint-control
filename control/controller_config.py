@@ -8,6 +8,7 @@
     - direction_gains：方向分段增益（级 1，已实现）
     - gain_poly：参数化逆映射 g(q) 系数（级 1.5，已实现）
     - gain_cross：几何耦合解耦交叉项 c(q_other)（级 1.6，已实现，加性）
+    - velocity_lead：速度前馈（相位超前）τ，u_ff = g(q_d + τ·q̇_d)（§8.4，D0 实证主导项）
     - dynamic_nn：学习型动态残差 MLP（§8.4 D1，已实现）——**残差式**：
       u_ff = g_static(q_d) + f_θ(q_d, q̇_d)；缺省/权重置零即精确退回纯稳态前馈。
     - hysteresis：迟滞补偿（级 2，预留）
@@ -27,6 +28,7 @@ class ControllerConfig:
     direction_gains: dict | None = None   # {"fb": {"pos","neg"}, "lr": {"pos","neg"}}
     gain_poly: dict | None = None         # {"fb": [b0,b1,b2,b3], "lr": [...]} 逆映射 g(q_self)
     gain_cross: dict | None = None        # {"fb": [c1..], "lr": [c1..]} 交叉项 c(q_other)，无常数项
+    velocity_lead: dict | None = None     # {"fb": tau_s, "lr": tau_s} 速度前馈相位超前（秒）
     dynamic_nn: dict | None = None        # 动态残差 MLP（§8.4 D1）：归一化参数 + 层权重
     slew_limit: float | None = None       # u_ff 每拍变化上限（offset/拍），None=不限
     hysteresis: dict | None = None        # {"fb": h, "lr": h} 迟滞补偿（offset），级 2
@@ -49,6 +51,7 @@ class ControllerConfig:
             direction_gains=data.get("direction_gains"),
             gain_poly=data.get("gain_poly"),
             gain_cross=data.get("gain_cross"),
+            velocity_lead=data.get("velocity_lead"),
             dynamic_nn=data.get("dynamic_nn"),
             slew_limit=data.get("slew_limit"),
             hysteresis=data.get("hysteresis"),
@@ -57,7 +60,8 @@ class ControllerConfig:
     def has_feedforward(self) -> bool:
         """是否启用前馈。"""
         return (self.direction_gains is not None or self.gain_poly is not None
-                or self.gain_cross is not None or self.dynamic_nn is not None)
+                or self.gain_cross is not None or self.dynamic_nn is not None
+                or self.velocity_lead is not None)
 
     def feedforward(self, q_d_fb: float, q_d_lr: float,
                     qdot_d_fb: float = 0.0, qdot_d_lr: float = 0.0,
@@ -68,8 +72,14 @@ class ControllerConfig:
         gain_poly > direction_gains；级 2 = 迟滞项 h·sign(q̇_d)。
         """
         if self.gain_poly is not None:
-            u_fb = _poly(self.gain_poly["fb"], q_d_fb)
-            u_lr = _poly(self.gain_poly["lr"], q_d_lr)
+            # 速度前馈（相位超前）：把静态逆映射按 τ·q̇_d 前瞻求值。
+            # τ=0（或缺省）→ 与 g(q_d) **逐位相同**，零退回保证天然成立。
+            q_eval_fb, q_eval_lr = q_d_fb, q_d_lr
+            if self.velocity_lead is not None:
+                q_eval_fb += self.velocity_lead.get("fb", 0.0) * qdot_d_fb
+                q_eval_lr += self.velocity_lead.get("lr", 0.0) * qdot_d_lr
+            u_fb = _poly(self.gain_poly["fb"], q_eval_fb)
+            u_lr = _poly(self.gain_poly["lr"], q_eval_lr)
         elif self.direction_gains is not None:
             g = self.direction_gains
             u_fb = q_d_fb / (g["fb"]["pos"] if q_d_fb >= 0 else g["fb"]["neg"])

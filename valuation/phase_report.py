@@ -57,12 +57,41 @@ def shift_by(t, q, tau):
     return t + tau, q
 
 
+def reversal_overshoot(t, qd, q, win_s=0.25, min_gap=0.2):
+    """换向点（q̇ 变号）附近 ±win_s 内的峰值过冲。
+
+    err = q_d − q。在 +侧换向（由正转负）时 err<0 表示球冲过目标（过冲）。
+    返回 (n_rev, 平均带符号峰值, 平均 |峰值|, 最大 |峰值|)。
+    """
+    dt = np.median(np.diff(t))
+    v = np.gradient(qd, dt)
+    s = np.sign(v)
+    idx = np.where(s[:-1] * s[1:] < 0)[0]
+    if len(idx) == 0:
+        return 0, 0.0, 0.0, 0.0
+    # 去重：换向点间隔 < min_gap 的合并
+    keep = [idx[0]]
+    for i in idx[1:]:
+        if (t[i] - t[keep[-1]]) > min_gap:
+            keep.append(i)
+    n = int(win_s / dt)
+    peaks = []
+    for i in keep:
+        w = slice(max(0, i - n), min(len(t), i + n))
+        e = qd[w] - q[w]
+        peaks.append(e[np.argmax(np.abs(e))])
+    p = np.array(peaks)
+    return len(peaks), float(p.mean()), float(np.abs(p).mean()), float(np.abs(p).max())
+
+
 def main() -> int:
-    ap = argparse.ArgumentParser(description="A/B 相位滞后报告（等效延迟 + 对齐对比图）")
+    ap = argparse.ArgumentParser(description="A/B 相位滞后报告（等效延迟 + 换向过冲 + 对齐对比图）")
     ap.add_argument("session")
     ap.add_argument("--t-min", type=float, default=5.0, help="稳态起点 s")
     ap.add_argument("--out", default=None, help="输出 PNG")
     ap.add_argument("--json", action="store_true", help="同时打印 JSON")
+    ap.add_argument("--reversal", action="store_true", help="额外输出换向过冲统计（判据②）")
+    ap.add_argument("--win-s", type=float, default=0.25, help="换向窗口 ±s")
     args = ap.parse_args()
 
     session = Path(args.session)
@@ -75,12 +104,27 @@ def main() -> int:
         rep[g] = {}
         for ax, iq, ic in (("fb", 1, 3), ("lr", 2, 4)):
             tau, cc = best_delay(t[m], d[m, iq], d[m, ic])
-            rep[g][ax] = {"delay_ms": round(tau * 1000, 1), "corr": round(cc, 4),
-                          "mae": round(float(np.abs(d[m, iq] - d[m, ic]).mean()), 4)}
-    print(json.dumps(rep, indent=2, ensure_ascii=False) if args.json else
-          "\n".join("seg%d: " % g + "  ".join(
-              "%s 延迟 %6.1f ms / MAE %.3f" % (ax, v["delay_ms"], v["mae"]) for ax, v in rep[g].items())
-              for g in sorted(rep)))
+            e = {"delay_ms": round(tau * 1000, 1), "corr": round(cc, 4),
+                 "mae": round(float(np.abs(d[m, iq] - d[m, ic]).mean()), 4)}
+            if args.reversal:
+                n_rev, mean_signed, mean_abs, max_abs = reversal_overshoot(
+                    t[m], d[m, iq], d[m, ic], args.win_s)
+                e["reversal"] = {"n": n_rev, "mean_signed_deg": round(mean_signed, 3),
+                                 "mean_abs_deg": round(mean_abs, 3), "max_abs_deg": round(max_abs, 3)}
+            rep[g][ax] = e
+    if args.json:
+        print(json.dumps(rep, indent=2, ensure_ascii=False))
+    else:
+        for g in sorted(rep):
+            line = "seg%d: " % g
+            for ax, v in rep[g].items():
+                line += "%s 延迟 %6.1f ms / MAE %.3f" % (ax, v["delay_ms"], v["mae"])
+                if "reversal" in v:
+                    r = v["reversal"]
+                    line += " / 换向过冲 n=%d 均值%+.2f° |峰|均值%.2f° 最大%.2f°" % (
+                        r["n"], r["mean_signed_deg"], r["mean_abs_deg"], r["max_abs_deg"])
+                line += "   "
+            print(line)
 
     try:
         import matplotlib
@@ -109,7 +153,7 @@ def main() -> int:
         ts, qs = shift_by(t[m], d[m, ic], tau)
         a.plot(ts, qs, color="tab:green", lw=1.0, ls=":", alpha=0.95,
                label="actual shifted by %.0f ms" % (tau * 1000))
-        a.set_title("seg%d %s  — 等效延迟 %.0f ms" % (g, axn, tau * 1000))
+        a.set_title("seg%d %s  --  delay %.0f ms" % (g, axn, tau * 1000))
         a.set_xlabel("t (s)")
         a.set_ylabel("%s (deg)" % axn)
         a.grid(alpha=0.3)

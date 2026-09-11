@@ -663,7 +663,7 @@ class Orchestrator:
 def _trajectory_info(args) -> dict:
     """从 args 提取轨迹类型 + 参数。"""
     for name in ("circle", "hold", "lissajous", "eight", "variable_circle", "waypoints", "grid",
-                 "speed_ladder", "random_fourier"):
+                 "speed_ladder", "random_fourier", "chirp"):
         val = getattr(args, name, None)
         if val is not None:
             return {"type": name, "params": val}

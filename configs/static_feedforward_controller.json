@@ -1,5 +1,5 @@
 {
-  "_note": "稳态静态前馈控制器（rig2）：逆映射 g(q) 覆盖 ±40° + 参考 PID（KP5/KI0.7/KD0.1）。段1 用。",
+  "_note": "稳态静态前馈控制器（rig2，**当前基线**）：逆映射 g(q) 覆盖 ±40° + PID（kp3/ki0.5/kd0.1，limit600）。slew_limit 2026-09-11 由 2.0 提升到 20.0（D3 A/B：原 200 offset/s 上限削掉快轴前馈，eight lr 超限 54.3%/等效滞后 280ms；解锁后三轨迹 6/6 轴改善，收益与限幅缺口剂量成正比，lr MAE −53%，且安全全绿）。旧值留档 configs/static_feedforward_slew2_controller.json。",
   "gain_poly": {
     "fb": [
       -4.889534371163219,
@@ -14,7 +14,7 @@
       -0.0016733449724934957
     ]
   },
-  "slew_limit": 2.0,
+  "slew_limit": 20.0,
   "kp": 3.0,
   "ki": 0.5,
   "kd": 0.1,

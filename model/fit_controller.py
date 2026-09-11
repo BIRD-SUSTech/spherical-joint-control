@@ -26,6 +26,7 @@ from pathlib import Path
 
 import numpy as np
 
+from control.loop import LOOP_HZ
 from model.dataset import load_session
 from model.gain_schedule import (eval_additive_cross, eval_poly,
                                  fit_additive_cross, fit_inverse_poly,
@@ -119,7 +120,12 @@ def main() -> int:
     ap.add_argument("--couple", action="store_true",
                     help="额外拟合二维耦合逆映射 g(q_fb,q_lr)，仅当留出验证不劣于 1D 时才写入")
     ap.add_argument("--couple-degree", type=int, default=3, help="二维逆映射总阶数（i+j≤d）")
-    ap.add_argument("--slew-limit", type=float, default=None, help="slew 限幅（可选写入）")
+    ap.add_argument("--slew-limit", type=float, default=None,
+                    help="slew 限幅，单位 offset/【拍】（写入配置；100Hz 即 ×100 = offset/s）")
+    ap.add_argument("--slew-limit-per-s", type=float, default=None,
+                    help="slew 限幅，单位 offset/【秒】（按 LOOP_HZ 换算写入；"
+                         "推荐用这个——'每拍'口径会在 LOOP_HZ 变更时静默改变物理上限，"
+                         "D3 事故根源之一）")
     args = ap.parse_args()
 
     csv_paths = []
@@ -206,6 +212,10 @@ def main() -> int:
 
     if args.slew_limit is not None:
         data["slew_limit"] = args.slew_limit
+    if args.slew_limit_per_s is not None:
+        data["slew_limit"] = round(args.slew_limit_per_s / LOOP_HZ, 4)   # offset/s → offset/拍
+        print(f"slew_limit: {args.slew_limit_per_s} offset/s ÷ {LOOP_HZ}Hz = "
+              f"{data['slew_limit']} offset/拍")
 
     out = Path(args.out)
     out.parent.mkdir(parents=True, exist_ok=True)
