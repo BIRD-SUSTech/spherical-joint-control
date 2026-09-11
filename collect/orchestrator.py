@@ -393,6 +393,7 @@ class Orchestrator:
         dt = 1.0 / LOOP_HZ
         next_t = t0
         prev_t_fb = prev_t_lr = None
+        prev_qdot_fb = prev_qdot_lr = 0.0
 
         while not self._stop_event.is_set():
             if self._guardian is not None and self._guardian.is_triggered:
@@ -403,7 +404,11 @@ class Orchestrator:
             t_fb, t_lr = self._traj(t)
             qdot_fb = (t_fb - prev_t_fb) / dt if prev_t_fb is not None else 0.0
             qdot_lr = (t_lr - prev_t_lr) / dt if prev_t_lr is not None else 0.0
+            # 目标加速度（二阶因果差分；目标解析平滑 → 干净）。v2 动态前馈需要 q̈_d。
+            qddot_fb = (qdot_fb - prev_qdot_fb) / dt
+            qddot_lr = (qdot_lr - prev_qdot_lr) / dt
             prev_t_fb, prev_t_lr = t_fb, t_lr
+            prev_qdot_fb, prev_qdot_lr = qdot_fb, qdot_lr
 
             pose = self._mocap.get_pose()
             if pose is None:
@@ -418,7 +423,8 @@ class Orchestrator:
             out_lr = int(pid_lr.calculate(curr_lr))
             ctrl = controller if controller is not None else self._controller
             if ctrl.has_feedforward():
-                ff_fb, ff_lr = ctrl.feedforward(t_fb, t_lr, qdot_fb, qdot_lr)
+                ff_fb, ff_lr = ctrl.feedforward(t_fb, t_lr, qdot_fb, qdot_lr,
+                                                qddot_fb, qddot_lr)
                 fade = min(1.0, t / self._args.startup_fade) if self._args.startup_fade > 0 else 1.0
                 out_fb = int(fade * ff_fb + out_fb)
                 out_lr = int(fade * ff_lr + out_lr)

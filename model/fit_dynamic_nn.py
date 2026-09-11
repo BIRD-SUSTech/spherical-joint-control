@@ -28,7 +28,9 @@ import numpy as np
 
 from control.controller_config import ControllerConfig
 
-FEATURES = ["q_d_fb", "q_d_lr", "qdot_d_fb", "qdot_d_lr"]
+FEATURES_V1 = ["q_d_fb", "q_d_lr", "qdot_d_fb", "qdot_d_lr"]
+FEATURES_V2 = FEATURES_V1 + ["qddot_d_fb", "qddot_d_lr"]
+FEATURES = FEATURES_V1   # 兼容旧引用（默认 v1）
 
 
 # ---------------------------------------------------------------------------
@@ -61,7 +63,7 @@ def base_static_u(cfg: ControllerConfig, q_fb: float, q_lr: float) -> tuple[floa
 
 
 def load_session_features(csv_path: Path, cfg: ControllerConfig, threshold: float,
-                          include_all: bool = False):
+                          include_all: bool = False, use_qddot: bool = False):
     """读一个会话 → (features (n,4), residual (n,2), seg (n,))。
 
     只取收敛段（|current−target| < threshold 两轴都满足）：此时 `u_总 ≈ 目标状态所需 u`，
@@ -105,12 +107,18 @@ def load_session_features(csv_path: Path, cfg: ControllerConfig, threshold: floa
         dt = np.median(np.diff(ts)) if len(ts) > 1 else 0.01
         vf = np.gradient(tf, dt)
         vl = np.gradient(tl, dt)
+        # 加速度同样在【全序列】上求（二阶差分；目标解析平滑 → 干净）
+        af = np.gradient(vf, dt)
+        al = np.gradient(vl, dt)
         for i in range(len(ts)):
             if not include_all and (abs(cf[i] - tf[i]) >= threshold
                                     or abs(cl[i] - tl[i]) >= threshold):
                 continue
             bf, bl = base_static_u(cfg, tf[i], tl[i])
-            feats.append([tf[i], tl[i], vf[i], vl[i]])
+            if use_qddot:
+                feats.append([tf[i], tl[i], vf[i], vl[i], af[i], al[i]])
+            else:
+                feats.append([tf[i], tl[i], vf[i], vl[i]])
             res.append([uf[i] - bf, ul[i] - bl])
             seg_ids.append(sid)
     return np.array(feats), np.array(res), np.array(seg_ids)
@@ -182,6 +190,8 @@ def export_nn(net, norm, clip: float) -> dict:
         "in_mean": in_mean.tolist(), "in_std": in_std.tolist(),
         "out_mean": [0.0] * len(out_mean), "out_std": [1.0] * len(out_std),
         "layers": layers, "act": "tanh", "clip": clip,
+        "n_in": int(len(in_mean)),                       # 4=v1(无q̈) / 6=v2(含q̈)
+        "features": FEATURES_V2 if len(in_mean) >= 6 else FEATURES_V1,
     }
 
 
@@ -203,6 +213,8 @@ def main() -> int:
     ap.add_argument("--epochs", type=int, default=300)
     ap.add_argument("--lr", type=float, default=1e-3)
     ap.add_argument("--seed", type=int, default=0)
+    ap.add_argument("--qddot", action="store_true",
+                    help="输入加 q̈_d（v2；D0 实证：LOSO 留出 R² +0.02~+0.10，远超双控制组）")
     ap.add_argument("--clip", type=float, default=None,
                     help="残差输出限幅（offset）；缺省=3×训练残差最大值")
     args = ap.parse_args()
@@ -225,7 +237,7 @@ def main() -> int:
 
     per_session = []
     for p in paths:
-        X, R, seg = load_session_features(p, cfg, args.threshold)
+        X, R, seg = load_session_features(p, cfg, args.threshold, use_qddot=args.qddot)
         print(f"{p.parent.name}: 收敛样本 {len(X)}")
         if len(X):
             per_session.append((X, R))

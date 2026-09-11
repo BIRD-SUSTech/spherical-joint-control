@@ -143,6 +143,7 @@ def main() -> int:
     dt = 1.0 / LOOP_HZ
     next_t = t0
     prev_t_fb = prev_t_lr = None
+    prev_qdot_fb = prev_qdot_lr = 0.0
 
     try:
         while (time.perf_counter() - t0) < args.duration:
@@ -150,7 +151,10 @@ def main() -> int:
             t_fb, t_lr = traj(t)
             qdot_fb = (t_fb - prev_t_fb) / dt if prev_t_fb is not None else 0.0
             qdot_lr = (t_lr - prev_t_lr) / dt if prev_t_lr is not None else 0.0
+            qddot_fb = (qdot_fb - prev_qdot_fb) / dt
+            qddot_lr = (qdot_lr - prev_qdot_lr) / dt
             prev_t_fb, prev_t_lr = t_fb, t_lr
+            prev_qdot_fb, prev_qdot_lr = qdot_fb, qdot_lr
 
             pose = mocap.get_pose()
             if pose is None:
@@ -165,7 +169,8 @@ def main() -> int:
             out_lr = pid_lr.calculate(curr_lr)
 
             if controller.has_feedforward():
-                ff_fb, ff_lr = controller.feedforward(t_fb, t_lr, qdot_fb, qdot_lr)
+                ff_fb, ff_lr = controller.feedforward(t_fb, t_lr, qdot_fb, qdot_lr,
+                                                      qddot_fb, qddot_lr)
                 fade = min(1.0, t / args.startup_fade) if args.startup_fade > 0 else 1.0
                 out_fb = fade * ff_fb + out_fb
                 out_lr = fade * ff_lr + out_lr

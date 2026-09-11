@@ -60,7 +60,8 @@ class ControllerConfig:
                 or self.gain_cross is not None or self.dynamic_nn is not None)
 
     def feedforward(self, q_d_fb: float, q_d_lr: float,
-                    qdot_d_fb: float = 0.0, qdot_d_lr: float = 0.0) -> tuple[float, float]:
+                    qdot_d_fb: float = 0.0, qdot_d_lr: float = 0.0,
+                    qddot_d_fb: float = 0.0, qddot_d_lr: float = 0.0) -> tuple[float, float]:
         """前馈反解：目标关节角（度）→ 差分 offset（含迟滞 + slew 整形）。
 
         静态基座 = own(q_self) + 交叉项 c(q_other)；own 依次回退
@@ -83,8 +84,10 @@ class ControllerConfig:
 
         # §8.4 D1：学习型动态残差（**残差式**，只加修正量；缺省/零权重=退回稳态前馈）
         if self.dynamic_nn is not None:
-            r_fb, r_lr = _nn_forward(self.dynamic_nn,
-                                     [q_d_fb, q_d_lr, qdot_d_fb, qdot_d_lr])
+            feats = [q_d_fb, q_d_lr, qdot_d_fb, qdot_d_lr]
+            if int(self.dynamic_nn.get("n_in", 4)) >= 6:   # v2：含 q̈（T1/D0 实证有效）
+                feats += [qddot_d_fb, qddot_d_lr]
+            r_fb, r_lr = _nn_forward(self.dynamic_nn, feats)
             u_fb += r_fb
             u_lr += r_lr
 
