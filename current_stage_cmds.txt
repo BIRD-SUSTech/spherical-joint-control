@@ -177,3 +177,32 @@ python -m model.merge_streams --session <D0会话1> <D0会话2> <D0会话3> \
   --out <D0会话>/aligned.npz
 
 # 判据：合并后检查 corr(q_lr, q̈_lr) 应显著偏离 −1（VIF < 2），否则 q̈ 仍不可辨识
+
+# ============================================================
+# D2：q̈ 动态前馈 v2 的多轨迹实机 A/B（判据：≥3 条轨迹一致通过）
+# ============================================================
+# 产物：configs/dynamic_nn_v2.json（= static_feedforward + dynamic_nn，唯一差异就是动态项）
+#   n_in=6（含 q̈_d）、clip=332、零权重=精确退回静态基线
+# 离线（D0 四会话 train-all）：fb R²=0.928 / lr 0.915 —— **离线不作判据**
+# 判据铁律（D1 教训：单轨迹 A/B 会误判，lissajous 过而 eight 败）：
+#   ① 三轨迹**两轴** MAE/RMSE 均不劣于静态基线（**必须含 Eight 类 1:2 相位**）
+#   ② 换向过冲下降（Eight lr 原为 +5.05°均值/+18.2°最大）
+#   ③ phase_report 等效延迟不恶化
+
+# 轨迹 1：Eight（关键——D1 在此翻车 fb +25.6%）
+python -m collect.orchestrator --ab --eight 20 10 --duration 60 \
+  --servo-port COM5 --force-port COM3 --calibration calibrations/rig2.json \
+  --controller-config configs/dynamic_nn_v2.json \
+  --baseline-controller-config configs/static_feedforward_controller.json \
+  --startup-fade 1.0
+# 轨迹 2：Lissajous
+python -m collect.orchestrator --ab --lissajous 20 20 0.1 0.16 --duration 60 ... 同上
+# 轨迹 3：variable-circle
+python -m collect.orchestrator --ab --variable-circle 20 10 --duration 60 ... 同上
+
+# 每条跑完
+python -m valuation.evaluate <会话> --ab
+python -m valuation.phase_report <会话> --json
+# 换向过冲复测（对照 T1 基线：Eight lr +5.05°）
+
+# 三条全过 → merge v2；任一条任一轴劣化 → 否决（保留静态前馈）

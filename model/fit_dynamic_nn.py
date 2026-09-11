@@ -213,6 +213,8 @@ def main() -> int:
     ap.add_argument("--epochs", type=int, default=300)
     ap.add_argument("--lr", type=float, default=1e-3)
     ap.add_argument("--seed", type=int, default=0)
+    ap.add_argument("--train-all", action="store_true",
+                    help="生产模式：用全部会话训练（随机 15%% 做早停验证），不浪费一个会话做留出")
     ap.add_argument("--qddot", action="store_true",
                     help="输入加 q̈_d（v2；D0 实证：LOSO 留出 R² +0.02~+0.10，远超双控制组）")
     ap.add_argument("--clip", type=float, default=None,
@@ -245,11 +247,20 @@ def main() -> int:
         print("有效会话不足 2 个（需留出泛化）", file=sys.stderr)
         return 1
 
-    hidx = args.holdout_session if args.holdout_session is not None else len(per_session) - 1
-    X_va, R_va = per_session[hidx]
-    X_tr = np.concatenate([s[0] for i, s in enumerate(per_session) if i != hidx])
-    R_tr = np.concatenate([s[1] for i, s in enumerate(per_session) if i != hidx])
-    print(f"\n训练 {len(X_tr)} 样本 / 留出会话 #{hidx} {len(X_va)} 样本")
+    if args.train_all:
+        X_all = np.concatenate([s[0] for s in per_session])
+        R_all = np.concatenate([s[1] for s in per_session])
+        n_val = max(200, int(0.15 * len(X_all)))
+        idx = np.random.default_rng(args.seed).permutation(len(X_all))
+        va, tr = idx[:n_val], idx[n_val:]
+        X_tr, R_tr, X_va, R_va = X_all[tr], R_all[tr], X_all[va], R_all[va]
+        print(f"\n【train-all】训练 {len(X_tr)} / 内部验证 {len(X_va)}（同分布随机切分，供早停）")
+    else:
+        hidx = args.holdout_session if args.holdout_session is not None else len(per_session) - 1
+        X_va, R_va = per_session[hidx]
+        X_tr = np.concatenate([s[0] for i, s in enumerate(per_session) if i != hidx])
+        R_tr = np.concatenate([s[1] for i, s in enumerate(per_session) if i != hidx])
+        print(f"\n训练 {len(X_tr)} 样本 / 留出会话 #{hidx} {len(X_va)} 样本")
 
     # 基线：残差全零（=当前稳态前馈）在留出集上的 RMSE —— 改进必须低于它
     rmse0 = float(np.sqrt(np.mean(R_va ** 2)))
@@ -277,6 +288,12 @@ def main() -> int:
 
     data = json.loads(Path(args.base_config).read_text(encoding="utf-8"))
     data["dynamic_nn"] = net_dict
+    data["_note"] = (f"§8.4 D1-v2 动态残差 MLP（含 q̈）| 训练会话 {len(paths)} 个"
+                     f"（{'train-all' if args.train_all else '留出会话'}），"
+                     f"threshold={args.threshold}° qddot={args.qddot} "
+                     f"hidden={args.hidden} depth={args.depth} epochs={args.epochs} | "
+                     f"n_in={net_dict['n_in']} clip={clip:.0f} | "
+                     f"基线=static_feedforward（g_static 固定不训练）")
     out = Path(args.out)
     out.parent.mkdir(parents=True, exist_ok=True)
     out.write_text(json.dumps(data, indent=2, ensure_ascii=False), encoding="utf-8")
