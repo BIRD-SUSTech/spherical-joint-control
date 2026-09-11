@@ -144,3 +144,36 @@ python -m model.fit_controller --converged-only --couple \
 # ============================================================
 # valuation.evaluate <session> --all  → metrics.json + 分段图
 # model.fit_controller --converged-only --couple  → 留出护栏
+
+# ============================================================
+# D0 采集（学习型动态前馈）——「激励 q̈、破退化」专用
+# ============================================================
+# 依据（T1 追加分析）：lr 换向过冲 +3~5°（幅值 20%），根因指向**未补偿的减速/惯性需求 q̈**；
+# 而历次回归都测不到 q̈，因为 ①单频 sine 上 q̈=−ω²q（corr −0.72 退化）②网格 |q̈|p99 仅 1.4°/s²（不激励）。
+# 故必须先采「频率富、加速度足」的数据。实测各轨迹的 q–q̈ 退化度（VIF，越低越可辨识）：
+#   speed-ladder 20（0.05/0.1/0.2/0.4Hz）: VIF 1.40  |q̈|p99 126   ← **首选**
+#   chirp 20（0.05→0.5Hz）:                 VIF 2.5   |q̈|p99 179
+#   random-fourier 20:                      VIF 3.5~7 视 seed
+#   2D 网格（对照）:                         VIF 1.0   |q̈|p99 1.4   ← 不激励
+
+# ① 速度阶梯（首选：破退化 + 激励 q̈）
+#    原 160s；建议再加一轮 30° 幅度覆盖大角度
+python -m collect.orchestrator --speed-ladder 20 --speeds 0.05 0.1 0.2 0.4 --speed-seg-dur 40 \
+  --servo-port COM5 --force-port COM3 --calibration calibrations/rig2.json \
+  --controller-config configs/static_feedforward_controller.json --startup-fade 1.0
+python -m collect.orchestrator --speed-ladder 30 --speeds 0.05 0.1 0.2 0.4 --speed-seg-dur 40 \
+  ... 同上
+
+# ② 线性扫频 chirp（备用，频率连续）
+python -m collect.orchestrator --chirp 20 0.05 0.5 60 \
+  ... 同上
+
+# ③ 随机多频 Fourier（2D 覆盖，配合 ①② 用）
+python -m collect.orchestrator --random-fourier 20 --seed 0 \
+  ... 同上
+
+# ④ 对齐 merge（四路→统一时间基，训练多模态特征用）
+python -m model.merge_streams --session <D0会话1> <D0会话2> <D0会话3> \
+  --out <D0会话>/aligned.npz
+
+# 判据：合并后检查 corr(q_lr, q̈_lr) 应显著偏离 −1（VIF < 2），否则 q̈ 仍不可辨识

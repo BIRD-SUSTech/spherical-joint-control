@@ -97,6 +97,22 @@ def make_traj(args):
             r = _ramp(t)
             return (_ladder(t, speeds) * r, _ladder(t, seq_lr) * r)
 
+    elif getattr(args, "chirp", None):
+        # 线性扫频 chirp（§8.4 D0）：频率连续变化 → 局部 q̈=−(2πf(t))²q 的系数随时间变
+        # → 全局上 q 与 q̈ 去共线，**破 q–q̈ 退化**（正弦轨迹上二者 corr≈−1 不可辨识）。
+        amp, f0, f1, sweep = args.chirp
+        k = (f1 - f0) / sweep if sweep > 0 else 0.0
+        ph_lr = args.chirp_phase_lr
+
+        def _phase(t, off):
+            return 2 * math.pi * (f0 * t + 0.5 * k * t * t) + off
+
+        def traj(t):
+            r = _ramp(t)
+            # 两轴同扫但相位错开，避免长期锁相
+            return (amp * math.sin(_phase(t, 0.0)) * r,
+                    amp * math.sin(_phase(t, ph_lr)) * r)
+
     elif getattr(args, "random_fourier", None):
         # 随机多频 Fourier 叠加（§8.4 D0）：(q, q̇) 空间覆盖最大化。
         # 固定 seed 保证可复现；按 Σ|a| 归一化使峰值 ≤ amp。
@@ -171,6 +187,8 @@ def trajectory_duration(args) -> float | None:
         return sum(w[2] for w in _grid_waypoints(fb_min, fb_max, lr_min, lr_max, step, dur))
     if getattr(args, "speed_ladder", None):
         return len(args.speeds) * args.speed_seg_dur
+    if getattr(args, "chirp", None):
+        return args.chirp[3]
     if args.waypoints:
         return sum(w[2] for w in _parse_waypoints(args.waypoints))
     return None

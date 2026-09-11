@@ -83,6 +83,10 @@ def parse_args() -> argparse.Namespace:
     p.add_argument("--speeds", nargs="+", type=float, default=[0.05, 0.1, 0.2, 0.4],
                    help="速度阶梯频率序列 Hz（默认 0.05 0.1 0.2 0.4）")
     p.add_argument("--speed-seg-dur", type=float, default=40.0, help="速度阶梯每档时长 s")
+    p.add_argument("--chirp", nargs=4, type=float, metavar=("AMP", "F0", "F1", "SWEEP_S"),
+                   help="线性扫频 chirp（§8.4 D0）：破 q–q̈ 退化、激励加速度（推荐）")
+    p.add_argument("--chirp-phase-lr", type=float, default=1.5708,
+                   help="chirp lr 轴相位偏移（rad，默认 π/2 避免锁相）")
     p.add_argument("--random-fourier", type=float, metavar="AMP_DEG",
                    help="随机多频 Fourier 轨迹（§8.4 D0）：(q,q̇) 覆盖最大化")
     p.add_argument("--fourier-harmonics", type=int, default=5, help="Fourier 谐波数")
