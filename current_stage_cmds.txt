@@ -296,3 +296,19 @@ python -m collect.orchestrator --ab --eight 20 10 --duration 60 --servo-port COM
 
 python -m valuation.evaluate <会话> --ab
 python -m valuation.phase_report <会话> --reversal --json
+
+# ============================================================
+# D4b：速度前馈【两种形式】A/B（加性线性 vs 相位超前）
+# ============================================================
+# 形式对照（干净 D0 全量离线 RMSE，offset）：
+#   [fb] τ=0 51.80 | ① 加性 c=+2.370 → 13.60 | ② 相位超前 τ=0.214s → 16.92  ← ①更好
+#   [lr] τ=0 53.27 | ① 加性 c=+2.440 → 14.22 | ② 相位超前 τ=0.190s → 24.52  ← ①更好(差42%)
+# 原因：τ 式 = 系数 g′(q)·τ，带工作点依赖；数据支持的系数近似常数 → 多引入 q 依赖反而更差。
+# 产物 configs/static_feedforward_vel_controller.json（两式并存：velocity_gain / velocity_lead）
+# 用法：清掉不用的那一项即得到单形式配置；系数置零逐位退回静态基线。
+python -m collect.orchestrator --ab --eight 20 10 --duration 60 --servo-port COM5 --force-port COM3 --calibration calibrations/rig2.json --controller-config configs/static_feedforward_vel_controller.json --baseline-controller-config configs/static_feedforward_controller.json --startup-fade 1.0
+python -m collect.orchestrator --ab --lissajous 20 20 0.1 0.16 --duration 60 (同上)
+python -m collect.orchestrator --ab --variable-circle 20 10 --duration 60 (同上)
+python -m valuation.evaluate <会话> --ab
+python -m valuation.phase_report <会话> --reversal --json
+# 判据：≥3 轨迹两轴不劣于静态基线；再比"加性 vs τ"哪一式更好（同场同轨迹）

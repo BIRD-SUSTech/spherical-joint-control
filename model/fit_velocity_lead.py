@@ -83,6 +83,15 @@ def sse_axis(cfg: ControllerConfig, ax: str, q, v, u, tau: float) -> float:
     return float(np.sum((u - pred) ** 2))
 
 
+def fit_linear(cfg, ax, q, v, u):
+    """加性线性式 u_ff = g(q_d) + c·q̇_d 的最优 c（最小二乘，含偏置）。"""
+    r = u - np.array([_poly(cfg.gain_poly[ax], x) for x in q])
+    A = np.column_stack([np.ones_like(v), v])
+    c, *_ = np.linalg.lstsq(A, r, rcond=None)
+    rmse = float(np.sqrt(np.mean((r - A @ c) ** 2)))
+    return float(c[1]), rmse
+
+
 def fit_tau(cfg, ax, q, v, u, lo=-0.05, hi=0.45, n=201):
     """网格搜索 τ（1-D，粗搜 + 细搜）。"""
     taus = np.linspace(lo, hi, n)
@@ -155,13 +164,33 @@ def main() -> int:
         print(f"\n全量拟合 [{ax}] τ = {tau:.4f} s   残差 RMSE {rmse0:.2f} → {rmse1:.2f} "
               f"({(rmse1/rmse0-1)*100:+.1f}%)")
 
-    print(f"\n→ velocity_lead = {json.dumps(lead)}")
+    # 加性线性式（D0 实测最优形式）：拟合 c 并与 τ 式对比
+    print("\n=== 形式对照（离线 RMSE，offset）：τ=0 vs 加性 c·q̇ vs 相位超前 τ ===")
+    gain = {}
+    for ax_i, ax in enumerate(["fb", "lr"]):
+        q = np.concatenate([p[0][:, ax_i] for p in parts])
+        v = np.concatenate([p[1][:, ax_i] for p in parts])
+        u = np.concatenate([p[2][:, ax_i] for p in parts])
+        c_lin, rmse_lin = fit_linear(cfg, ax, q, v, u)
+        tau, _ = fit_tau(cfg, ax, q, v, u)
+        rmse0 = float(np.sqrt(np.mean((u - np.array([_poly(cfg.gain_poly[ax], x) for x in q])) ** 2)))
+        rmse_tau = float(np.sqrt(np.mean((u - np.array([_poly(cfg.gain_poly[ax], x) for x in (q + tau * v)])) ** 2)))
+        gain[ax] = c_lin
+        print(f"  [{ax}] τ=0: {rmse0:6.2f} | 加性 c={c_lin:+.3f} → {rmse_lin:6.2f} | "
+              f"τ={tau:.4f}s → {rmse_tau:6.2f}  → 优者：{'加性线性' if rmse_lin < rmse_tau else '相位超前 τ'}")
+    print(f"\n→ velocity_gain = {json.dumps(gain)}")
+    print(f"→ velocity_lead = {json.dumps(lead)}")
     if args.out:
         data = json.loads(Path(args.base_config).read_text(encoding="utf-8-sig"))
         data["velocity_lead"] = lead
-        data["_note"] = (f"速度前馈（相位超前）u_ff = g(q_d + τ·q̇_d) | τ_fb={lead['fb']:.4f}s "
-                         f"τ_lr={lead['lr']:.4f}s | 由 {len(parts)} 个干净 D0 会话拟合（slew 20 基线）| "
-                         f"τ=0 逐位退回 static_feedforward | 依据：D0 方差分解 q̇ 主导（仅 q̇ R² 0.88~0.96）")
+        data["velocity_gain"] = gain
+        data["_note"] = (f"速度前馈（两种形式并存，A/B 二选一）："
+                         f"① 加性线性 velocity_gain c_fb={gain['fb']:+.3f} c_lr={gain['lr']:+.3f} "
+                         f"offset/(°/s)（D0 干净数据实测更优）；"
+                         f"② 相位超前 velocity_lead τ_fb={lead['fb']:.4f}s τ_lr={lead['lr']:.4f}s"
+                         f"（等价系数 g′(q)·τ，带 q 依赖，离线 RMSE 差约 48%）。"
+                         f"由 {len(parts)} 个干净 D0 会话拟合（slew 20 基线）；"
+                         f"两式的系数置零均逐位退回 static_feedforward")
         out = Path(args.out)
         out.parent.mkdir(parents=True, exist_ok=True)
         out.write_text(json.dumps(data, indent=2, ensure_ascii=False), encoding="utf-8")

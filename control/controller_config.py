@@ -8,7 +8,9 @@
     - direction_gains：方向分段增益（级 1，已实现）
     - gain_poly：参数化逆映射 g(q) 系数（级 1.5，已实现）
     - gain_cross：几何耦合解耦交叉项 c(q_other)（级 1.6，已实现，加性）
-    - velocity_lead：速度前馈（相位超前）τ，u_ff = g(q_d + τ·q̇_d)（§8.4，D0 实证主导项）
+    - velocity_gain：速度前馈（加性线性）u_ff = g(q_d) + c·q̇_d（§8.4，D0 实证最佳形式）
+    - velocity_lead：速度前馈（相位超前式）u_ff = g(q_d + τ·q̇_d)（等价于系数 g′(q)·τ，
+      带 q 依赖；实测离线 RMSE 比加性式差 48%，保留供 A/B 对照）
     - dynamic_nn：学习型动态残差 MLP（§8.4，已实现）——**残差式**，权重置零=精确退回基座。
       权重可**内联在 JSON**（dynamic_nn）或**存 npz**（dynamic_nn_npz，推荐：JSON 只留引用、
       权重用二进制，避免 47KB JSON 嵌套列表）。
@@ -29,6 +31,7 @@ class ControllerConfig:
     direction_gains: dict | None = None   # {"fb": {"pos","neg"}, "lr": {"pos","neg"}}
     gain_poly: dict | None = None         # {"fb": [b0,b1,b2,b3], "lr": [...]} 逆映射 g(q_self)
     gain_cross: dict | None = None        # {"fb": [c1..], "lr": [c1..]} 交叉项 c(q_other)，无常数项
+    velocity_gain: dict | None = None     # {"fb": c, "lr": c} 速度前馈加性系数 offset/(°/s)
     velocity_lead: dict | None = None     # {"fb": tau_s, "lr": tau_s} 速度前馈相位超前（秒）
     dynamic_nn: dict | None = None        # 动态残差 MLP（内联形式）：归一化参数 + 层权重
     dynamic_nn_npz: str | None = None     # 动态残差 MLP 权重文件（npz）；load 时载入 dynamic_nn
@@ -54,6 +57,7 @@ class ControllerConfig:
             direction_gains=data.get("direction_gains"),
             gain_poly=data.get("gain_poly"),
             gain_cross=data.get("gain_cross"),
+            velocity_gain=data.get("velocity_gain"),
             velocity_lead=data.get("velocity_lead"),
             dynamic_nn=data.get("dynamic_nn"),
             dynamic_nn_npz=data.get("dynamic_nn_npz"),
@@ -72,7 +76,7 @@ class ControllerConfig:
         """是否启用前馈。"""
         return (self.direction_gains is not None or self.gain_poly is not None
                 or self.gain_cross is not None or self.dynamic_nn is not None
-                or self.velocity_lead is not None)
+                or self.velocity_gain is not None or self.velocity_lead is not None)
 
     def feedforward(self, q_d_fb: float, q_d_lr: float,
                     qdot_d_fb: float = 0.0, qdot_d_lr: float = 0.0,
@@ -97,6 +101,11 @@ class ControllerConfig:
             u_lr = q_d_lr / (g["lr"]["pos"] if q_d_lr >= 0 else g["lr"]["neg"])
         else:
             u_fb = u_lr = 0.0
+
+        # 速度前馈（加性线性）：u_ff += c·q̇_d（D0 干净数据实测最优形式）
+        if self.velocity_gain is not None:
+            u_fb += self.velocity_gain.get("fb", 0.0) * qdot_d_fb
+            u_lr += self.velocity_gain.get("lr", 0.0) * qdot_d_lr
 
         # 级 1.6：几何耦合解耦交叉项（加性，无常数项）
         if self.gain_cross is not None:
