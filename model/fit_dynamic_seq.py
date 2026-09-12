@@ -176,7 +176,7 @@ def load_session(session: Path, smooth: int = 15, acc_h: int = 10,
         hi = max(horizon, 1)
         for i in range(len(rows) - hi):
             # use_u_hist=False：历史里【不放 u】——否则 h 已含 u_{t-1}≈u_t，头部 u_t 输入被架空
-            # （实测：打乱 u_t 后留出 RMSE 不变 → ∂F/∂u_t≈0 → 反解无界。见 validate_forward_inverse）
+            # （实测：打乱/去掉 u 后留出 RMSE 不变 → ∂F/∂u_t≈0 → 反解无界。见 docs/STATUS.md §4）
             u_prev = ((uf[i - 1], ul[i - 1]) if i > 0 else (uf[i], ul[i])) if use_u_hist else (0.0, 0.0)
             x = [qf[i], ql[i], vf[i], vl[i], u_prev[0], u_prev[1]]
             x += list(imu[1][gi[i]]) if imu else [0.0] * 6

@@ -1,7 +1,7 @@
 # T1 报告：张力特征是否解释"隐状态"——**结论：不支持；且发现两个检验陷阱**
 
 日期：2026-09-11 ｜ 数据：`R2_L1p6_verification/data` 四会话（grid×2 + lissajous + eight，收敛样本 38995）
-工具：`model/test_hidden_state.py`（可复现）
+工具：`model/test_hidden_state.py`（**已随路线关闭删除**；结论保留，见 `docs/STATUS.md` §4）
 
 ## 一、假设与判据
 
@@ -178,7 +178,7 @@ t=6.55  目标lr=+18.59°  实际lr=+23.91°  误差 −5.32°   u_lr=306
 ## 六、D0 数据到位后的 q̈ 项判定：**显著 ✅**（与张力的否定形成对照）
 
 D0 第二轮采集专门为"激励 q̈、破退化"设计（`R2_D0_verification`，合并 VIF 1.28/1.31 < 2、
-`|q̈|`p99 达 231 °/s²）。用 `model/fit_dynamic_terms.py`（新工具）做判定。
+`|q̈|`p99 达 231 °/s²）。用 `model/fit_dynamic_terms.py`（**已删除**）做判定。
 
 ### 6.1 工具纪律（继承两处修复 + T1 教训）
 

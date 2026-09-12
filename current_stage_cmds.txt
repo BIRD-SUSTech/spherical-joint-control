@@ -1,365 +1,92 @@
 # ============================================================
-# 新硬件 rig2：稳态前馈从头重建（动态前馈暂缓，完成稳态后再讨论）
+# rig2 球面关节 · 当前阶段命令表
+# 现状：**稳态前馈已收敛**；**时序动态前馈可用（论文主模型）**
+# 详见 docs/STATUS.md（四条控制器 / 主结果 / 已关闭路线 / 判定纪律）
 # ============================================================
-# 硬件变更：缆绳弹性更小、舵机驱动更强、结构不变
-# 固件协议：v2 单帧多通道（11 字节，已实现）——host 端无需开关
-# 接口不变：舵机 COM5 / 力传感器 COM3 / 动捕 10.1.1.198
-# 力传感器：只取 ch1–ch4 = 4 根缆张力（ch5/ch6 不用）
-# 铁律：每级只进不退（A/B 持平或更好才 merge）；M3 标定增益必须在 M4 开环之前
-# 判据：python -m valuation.evaluate <session> --all（MAE/RMSE/max + 残差 std）
-# 归档：会话回传 /mnt/nas/.../M*_verification/data/
-# 旧 rig1 的 configs/controller_v1..v8 全部作废，新 rig 用 configs/rig2_v*.json
 
-# ============================================================
-# M1+M2：最小闭环 + 采集自检（验证闭环/符号/采集链路）
-# ============================================================
-# 先离线 mock 跑通（无硬件，验证代码）
-python -m collect.orchestrator --mock --circle 5 8 --duration 5
+# ---------- 四条控制器（仓库只保留这四个） ----------
+#  #1 configs/baseline_controller.json                     纯 PID（无前馈）
+#  #2 configs/static_feedforward_slew20_controller.json   稳态前馈 g(q_d)+slew20+PID  ← 已收敛
+#  #3 configs/dynamic_nn_v3_static.json (+.npz)           NN 动态前馈（MLP 残差，论文对照架构）
+#  #4 configs/dynamic_seq_v4.json (+.pt)                  时序动态前馈（GRU，22 维全传感器）← 论文主模型
+#
+#  #3/#4 都是**残差式**：修正项置零 = 逐位退回 #2（零回归保证，已机器验证）
 
-# 实机：小圆 5°/8s × 20s。闭环 PID 不消费增益，rig2.json 增益为 null 也可跑；
-# 此步只看：① 球杆是否跟着圆走 ② 方向对（不对改 rig2.json 的 front_back_sign/left_right_sign）
-# ③ mocap/servo/imu/force 四路 CSV 是否都落盘
-python -m collect.orchestrator --circle 5 8 --duration 20 --servo-port COM5 --force-port COM3 --calibration calibrations/rig2.json
+# ---------- 环境 ----------
+# conda env: spherical_joint（torch 2.13；训练 --device auto 自动用 CUDA）
+# 舵机 COM5 | 力 COM3 | 动捕 10.1.1.198 | calibration calibrations/rig2.json
 
 # ============================================================
-# M3：符号 + 增益标定（安全前提，必须先于 M4 开环）
+# A. 采集 / 标定（复用）
 # ============================================================
-# 单轴微幅阶跃 offset=20/40/60 → 2×2 增益矩阵 + 符号，写回 rig2.json
-# 新舵机更强，60 offset 产生的角度可能比旧 rig 大，但仍在个位数度，安全
-python -m control.calibrate --servo-port COM5 --out calibrations/rig2.json --csv <M3会话>/calibration.csv
+python -m control.calibrate --servo-port COM5 --out calibrations/rig2.json    # M3 标定（开环前必做）
 
-# 检查：cat calibrations/rig2.json 确认 gain_deg_per_offset 已非 null
-# （若为 null，M4 开环会被 orchestrator 直接拒绝执行）
-
-# 力标定（共模预紧 §8.3.2 用）：确认 ch1..ch4 与 4 根缆的对应关系
-# 用单缆微幅阶跃看哪路张力变化（不猜测，数据确认）
-
-# ============================================================
-# M4：开环激励（用 M3 实测增益，覆盖 ±5° 工作区）
-# ============================================================
-python -m collect.orchestrator --open-loop --servo-port COM5 --force-port COM3 --calibration calibrations/rig2.json
-
-# ============================================================
-# 级 1：稳态逆映射 g(q)（开环拟合，含 bias + slew）
-# ============================================================
-# 前提：M4 开环已跑（default_segments 覆盖 ±5°）。g(q) 只在拟合范围内有效，
-# A/B 必须用 circle5（在 ±5° 内，不外推）。大角度在"滚雪球"阶段单独扩。
-# ⚠️ --slew-limit 自 2026-09-11（D3 merge）起统一用 20.0（=2000 offset/s）：
-#    旧值 2.0 @100Hz 仅 200 offset/s，会削掉快轴前馈（eight lr 超限 54.3%）。本文件内所有
-#    --slew-limit 均已更新为 20.0；历史会话记录的仍是旧值，复现时看 session_metadata.json。
-python -m model.fit_controller --session <M4会话1> <M4会话2> --out configs/rig2_v1.json --slew-limit 20.0
-# 检查：无"⚠️ 非单调"告警（有则降 --degree 或回退 direction_gains）
-
-# A/B：级1 vs 纯 PID（circle5，同轨迹、同中立起步、段间回正）
-python -m collect.orchestrator --ab --circle 5 8 --duration 40 --servo-port COM5 --force-port COM3 --calibration calibrations/rig2.json --controller-config configs/rig2_v1.json --startup-fade 1.0
-
-# 判据：valuation.evaluate <会话> --ab → fb/lr 两轴 MAE/RMSE 都不劣于纯 PID 才 merge 级1；
-#       任何一轴回退 → 否决，回到纯 PID 重查 M3/M4。
-
-# ============================================================
-# 滚雪球：大角度扩展到 40°（级1 merge 后，逐级推进，绝不跳档）
-# ============================================================
-# 目标：g(q) 有效范围从 ±5° 一路扩到 ±40°（工作空间 40 度）。
-# 安全铁律：增益随幅度爬升，用小幅增益换算大角度 offset 会超调、逼近 guardian 70°。
-#          因此每扩一档，先用上一档实测的割线增益校正，再跑下一档（数据驱动，不猜）。
-
-# 档1：±15/20°（用 M3 实测增益起步）
-python -m collect.orchestrator --open-loop --large-angle --servo-port COM5 --force-port COM3 --calibration calibrations/rig2.json
-# 测割线增益（找出该档最大幅度段的有效增益）
-python -m model.measure_gain --session <档1会话>
-
-# 档2：±30/40°（用档1测得的 --gain-fb/--gain-lr 校正，防超调）
-python -m collect.orchestrator --open-loop --extreme --servo-port COM5 --force-port COM3 --calibration calibrations/rig2.json --gain-fb <档1割线增益fb*1.15> --gain-lr <档1割线增益lr*1.15>
-# 再测，确认实际达到的峰值角 ≈ 目标（若显著低于 40° → 增益仍偏保守，可再放大；若接近 70° 立刻停）
-
-# 合并重拟合 g(q)（原 M4 + 档1 + 档2 会话，覆盖 ±40°）
-python -m model.fit_controller --session <M4会话> <档1会话> <档2会话> --out configs/rig2_v2.json --slew-limit 20.0
-# 检查：无 "⚠️ 非单调" 告警；若 ±40° 内三阶多项式折叠 → 升 --degree 或分段
-
-# 大角度闭环 A/B（circle/waypoints ±20/30/40°，同轨迹 baseline vs 前馈）
-# 判据：两轴不劣于 baseline 才 merge；折叠/外推失败 → 否决
-# ⚠️ 大角度闭环已观察到震荡：根因=四缆松弛（力 ch1-ch4≈0）→ 先做共模预紧，再复测
-
-# ============================================================
-# 共模预紧标定（§8.3.2，大角度震荡第一优先，先于级1.6）
-# ============================================================
-# 静态持位标定已证伪：静态张力已≥T_min → c≈0，测不到动态换向松弛。
-# 两种正确做法（可都跑、取较大值）：
-#   A) 开环静态：发单轴恒定 offset→稳态→读实际位姿→扫正交对共模 c→拟合 c(q)
-#      （u_orth=0 正是换向瞬间的差分条件，能测到位置相关的几何松弛）
-#   B) 动态：扫恒定 c0，跑驱动轴正弦制造换向，测动态最小张力（覆盖速度分量）
-
-# A) 开环静态标定（位置相关 c(q)，用雪球测得的割线增益换算，防超调）
-python -m control.calibrate_co_tension --open-loop --servo-port COM5 --force-port COM3 --calibration calibrations/rig2.json --gain-fb 0.090 --gain-lr 0.082 --t-min 500 --c-max 400 --c-step 50 --max-offset 500 --hold-s 4
-
-# B) 动态标定（恒定 c0 兜底）
-python -m control.calibrate_co_tension --dynamic --servo-port COM5 --force-port COM3 --calibration calibrations/rig2.json --controller-config configs/rig2_v2.json --t-min 500 --c-max 400 --c-step 50 --drive-amp 20 --drive-freq 0.1 --drive-duration 20
-
-# 检查：cat calibrations/rig2.json 确认 co_tension 已写入（A 给 [c0,c2,...]；B 给 [c0]）
-# 复测大角度闭环：circle20 或 waypoints ±30/40，看震荡是否消除
-# 若还有残余震荡 → 对"预紧后更硬"的系统做 Kd 扫描（Kd 已找到 U 形最优点 0.5，Kp 保持 8）
-
-# ============================================================
-# 级 1.6：几何耦合 gain_cross（需 ≥2 个 2D 闭环收敛段）
-# ============================================================
-# 先采 2D 闭环（circle 覆盖工作区 + 收敛段；40° 范围用 circle30 起步）
-python -m collect.orchestrator --circle 30 10 --duration 60 --servo-port COM5 --force-port COM3 --calibration calibrations/rig2.json --controller-config configs/rig2_v2.json --startup-fade 1.0
-
-# 留一会话护栏拟合（只有两轴都不劣于 1D 才写 gain_cross）
-python -m model.fit_controller --converged-only --couple --session <circle30会话1> <circle30会话2> --out configs/rig2_v3.json --slew-limit 20.0
-
-# ============================================================
-# 机制 A：收敛段精化 g(q)（大角度滚雪球）
-# ============================================================
-# 40° 开环覆盖后，用闭环收敛段 (q_d, u_log) 重拟合 g(q)（级1.6 之后）
-
-# ============================================================
-# 动态前馈（迟滞/摩擦/速度）——【暂缓】
-# ============================================================
-# 完成稳态前馈（g(q) + gain_cross + 收敛段精化 + 大角度）并 A/B 收敛后，再讨论动态项。
-
-# ============================================================
-# 分析口径（开发 PC，数据回传后）
-# ============================================================
-# valuation.evaluate <session> --all  → metrics.json + 分段图
-# model.fit_controller --converged-only --couple  → 留出护栏
-
-# ============================================================
-# D0 重采（学习型动态前馈的数据基础）——【2026-09-11 因限幅污染重采】
-# ============================================================
-# 为什么重采：旧 D0 四会话（175628 / 174350 / 174641 / 174802）采于 slew_limit=2.0
-#   （=200 offset/s 前馈上限）之下，快轴前馈被限幅（需求 592–993 offset/s，18–60% 采样触限）：
-#     - 训练标签 r = u_总 − g_static(q_d) 与"纯限幅缺口"相关 **0.44–0.79**
-#     - 且真实速度项与限幅缺口**数学共线**（缺口 ≈ −τ·g′·q̇）→ 现有数据无法分离二者
-#   证据见 NAS experiment_logs/R2_D2v2_verification/01_..._否决报告.md §5/§6
-# 现状：基线 configs/static_feedforward_slew20_controller.json 的 slew_limit 已是 **20.0**（D3 merge），
-#   用同一批命令重跑即得干净标签，且与旧会话 **1:1 可比**（唯一差异就是限幅）。
-# 设计：轨迹与时长**刻意与旧 D0 完全一致**（160/160/60/180s），以便逐会话量化"限幅伪影"。
-#   速度阶梯在同一位置范围上给 4 档速度（0.05/0.1/0.2/0.4Hz）→ 天然把 c·q̇ 与 g(q) 解耦，
-#   是识别**速度型**动态项的最佳轨迹（旧的目标项 q̈ 只占标签方差 11%，主导项是速度 q̇）。
-
-# 前置自检：应打印 20.0
-python -c "import json,pathlib;print(json.loads(pathlib.Path('configs/static_feedforward_slew20_controller.json').read_text(encoding='utf-8-sig'))['slew_limit'])"
-
-# ① 速度阶梯 20°（首选：破 q–q̈ 退化 + 激励速度/加速度）  [旧对应会话 175628]
+# 稳态前馈控制下的激励采集（D0 干净集协议：slew_limit=20）
 python -m collect.orchestrator --speed-ladder 20 --speeds 0.05 0.1 0.2 0.4 --speed-seg-dur 40 --servo-port COM5 --force-port COM3 --calibration calibrations/rig2.json --controller-config configs/static_feedforward_slew20_controller.json --startup-fade 1.0
-
-# ② 速度阶梯 30°（大角度覆盖）  [旧对应会话 174350]
-python -m collect.orchestrator --speed-ladder 30 --speeds 0.05 0.1 0.2 0.4 --speed-seg-dur 40 --servo-port COM5 --force-port COM3 --calibration calibrations/rig2.json --controller-config configs/static_feedforward_slew20_controller.json --startup-fade 1.0
-
-# ③ 线性扫频 chirp（频率连续，破单频 sine 的 q̈=−ω²q 退化）  [旧对应会话 174641]
+python -m collect.orchestrator --speed-ladder 30 --speeds 0.05 0.1 0.2 0.4 --speed-seg-dur 40 (同上)
 python -m collect.orchestrator --chirp 20 0.05 0.5 60 --servo-port COM5 --force-port COM3 --calibration calibrations/rig2.json --controller-config configs/static_feedforward_slew20_controller.json --startup-fade 1.0
+python -m collect.orchestrator --random-fourier 20 --seed 0 --duration 180 (同上)
 
-# ④ 随机多频 Fourier（2D 覆盖，位置/速度去相关）  [旧对应会话 174802]
-python -m collect.orchestrator --random-fourier 20 --seed 0 --duration 180 --servo-port COM5 --force-port COM3 --calibration calibrations/rig2.json --controller-config configs/static_feedforward_slew20_controller.json --startup-fade 1.0
-
-# ⑤ 每条会话的验收（三项全绿才能进训练）
-python -m [DELETED] --session collect/logs/<新会话>     # ①超限%=0 ②corr(r,gap)≈0 ③方差分解
-python -m [DELETED] --session collect/logs/<新会话>    # VIF / corr(q,q̈) / |q̈|p99
-#   旧值对照（复核历史会话加 --slew-limit 2.0）：
-#     超限% 18.5–59.6%；corr(r,gap) 0.44–0.79
-#     方差分解 gap +0.250 / q̇ +0.743 / q̈ −0.177，R²=0.807，**仅 q̈ R²=0.114**（lr 0.108）
-#   通过标准：超限% = 0 且 corr(r,gap) ≈ 0
-#   判读：若重采后"仅 q̈ R²"仍 ≈0.1 → 确认主导项是速度型 → 架构改向 g(q,q̇)，别再堆 q̈ 容量
-
-# ⑥ 对齐 merge（四路→统一时间基，训练多模态特征用）
-python -m [DELETED] --session <新会话1> <新会话2> <新会话3> <新会话4> --out <新会话1>/aligned.npz --max-gap-ms 120
+# 滚雪球开环激励（大角度/极端段集；增益需先实测校正，防增益爬升超调）
+python -m collect.orchestrator --open-loop --large-angle --servo-port COM5 --force-port COM3 --calibration calibrations/rig2.json
+python -m model.measure_gain --session <档1会话>          # 割线增益 → --gain-fb/--gain-lr
 
 # ============================================================
-# D2：q̈ 动态前馈 v2 的多轨迹实机 A/B（判据：≥3 条轨迹一致通过）
+# B. 评价（所有 A/B 都跑这两个）
 # ============================================================
-# 产物：configs/dynamic_nn_v2.json（= static_feedforward + dynamic_nn，唯一差异就是动态项）
-#   n_in=6（含 q̈_d）、clip=332、零权重=精确退回静态基线
-# 离线（D0 四会话 train-all）：fb R²=0.928 / lr 0.915 —— **离线不作判据**
-# 判据铁律（D1 教训：单轨迹 A/B 会误判，lissajous 过而 eight 败）：
-#   ① 三轨迹**两轴** MAE/RMSE 均不劣于静态基线（**必须含 Eight 类 1:2 相位**）
-#   ② 换向过冲下降（Eight lr 原为 +5.05°均值/+18.2°最大）
-#   ③ phase_report 等效延迟不恶化
-
-# 轨迹 1：Eight（关键——D1 在此翻车 fb +25.6%）
-python -m collect.orchestrator --ab --eight 20 10 --duration 60 --servo-port COM5 --force-port COM3 --calibration calibrations/rig2.json --controller-config [DELETED] --baseline-controller-config configs/static_feedforward_slew20_controller.json --startup-fade 1.0
-# 轨迹 2：Lissajous（D1 唯一通过的轨迹，必须复查不倒退）
-python -m collect.orchestrator --ab --lissajous 20 20 0.1 0.16 --duration 60 --servo-port COM5 --force-port COM3 --calibration calibrations/rig2.json --controller-config [DELETED] --baseline-controller-config configs/static_feedforward_slew20_controller.json --startup-fade 1.0
-# 轨迹 3：variable-circle
-python -m collect.orchestrator --ab --variable-circle 20 10 --duration 60 --servo-port COM5 --force-port COM3 --calibration calibrations/rig2.json --controller-config [DELETED] --baseline-controller-config configs/static_feedforward_slew20_controller.json --startup-fade 1.0
-
-# 每条跑完（seg0=静态基线，seg1=dynamic_nn_v2；两段仅动态项不同，PID/gain_poly/slew 完全一致）
-python -m valuation.evaluate collect/logs/<会话> --ab
-python -m valuation.phase_report collect/logs/<会话> --reversal --json
-# 换向过冲复测（判据②，对照 T1 基线：Eight lr |峰|均值 5.02°、均值+0.24°、最大 5.78°）
-# 命中判据：seg1 的 fb/lr 两轴 reversal.mean_abs_deg 均 < seg0
-
-# 三条全过 → merge v2；任一条任一轴劣化 → 否决（保留静态前馈）
-
-# ★ 实测结果（2026-09-11）：三条全败 → **v2 否决**（详见 NAS
-#   experiment_logs/R2_D2v2_verification/01_d2v2_多轨迹ab_否决报告.md）
-#   eight  fb +3.6%/+8.0%  lr +6.4%/+6.4%   (MAE/RMSE)
-#   liss   fb +6.5%/+9.0%  lr +11.6%/+13.2%
-#   vcirc  fb +3.7%/+8.0%  lr +0.3%/+3.4%
-#   判据③ 等效延迟 5/6 轴恶化或持平（fb 均 −20→−40ms）
-
-# ============================================================
-# D3：slew_limit 限幅解锁 A/B（根因验证；无需重训，~3 min）
-# ============================================================
-# 根因：控制回路 100Hz × slew_limit=2.0 offset/拍 = **200 offset/s 前馈硬上限**，
-#   而轨迹需求 150–1106 offset/s（D0 峰值 1432）：
-#     eight      fb 需求 150 → 超限 0.0%   | lr 需求 337 → 超限 54.3%（等效滞后 280ms）
-#     lissajous  fb 需求 150 → 超限 0.0%   | lr 需求 269 → 超限 42.3%
-#     vcirc      fb 需求 344 → 超限 23.7%  | lr 需求 425 → 超限 25.2%
-#   这正解释"lr 换向过冲是 fb 的 2–4 倍"（5.12° vs 1.57°）：**快轴前馈被削成滞后信号**。
-#   另外 u_nn 与 g_static 共用同一限幅器 → 动态修正自身也被限速，结构上无法恢复超前。
-#   标签污染：残差 r 与"纯限幅缺口"相关性 0.30–0.81（eight lr 0.806）→ 修好后 D0 需重采。
-# 判据：Eight lr 换向过冲（基线 |峰|均值 5.12°）与 fb/lr 两轴 MAE/RMSE 下降；fb 轴本就不限幅，应基本不变。
-
-python -m collect.orchestrator --ab --eight 20 10 --duration 60 `
-  --servo-port COM5 --force-port COM3 --calibration calibrations/rig2.json `
-  --controller-config configs/static_feedforward_slew20_controller.json `
-  --baseline-controller-config configs/static_feedforward_slew20_controller.json `
-  --startup-fade 1.0
-
-python -m valuation.evaluate collect/logs/<会话> --ab
-python -m valuation.phase_report collect/logs/<会话> --reversal --json
-
-# ★ 实测结果（2026-09-11，会话 194304，eight 20/10）—— **通过，根因确认**
-#   lr: MAE 2.3674 → 1.1133（−53.0%）RMSE −52.2% max −49.9%
-#       换向过冲 |峰|均值 5.04° → 2.28°（−54.8%）；等效延迟 70 ms → 0 ms
-#   fb: MAE −1.0% RMSE +0.2% 过冲 1.55° → 1.56°（**不变，与预注册预测逐项命中**）
-#   → 因为 eight 只有 lr 被限幅（需求 337 > 200 offset/s，54.3% 采样触限），fb 需求 150 从不触限
-#   安全：无 guardian 触发、max|q| 23.3°、max|u| 316（limit 600 的 0%）、slew20 残余限幅 0%
-
-# --- D3 三轨迹确认（铁律：多轨迹 A/B 才 merge）--- 均已跑完
-#   lissajous     194823：fb −4.6%（缺口 0，不动）/ lr −34.1%（缺口 29.5，超限 42.3%）
-#                          过冲 lr 3.80→1.76°，延迟 lr 10→−10 ms
-#   variable-circle 195041：fb **−39.4%**（缺口 43.6，超限 23.7%）/ lr −36.6%（缺口 48.3）
-#                          过冲 fb 2.62→1.49°、lr 2.53→1.96°；延迟 fb 70→0 ms、lr 60→−10 ms
-#   ★ 剂量-响应：缺口 0.0 → ΔMAE −1.0%/−4.6%；缺口 29.5→−34.1%；43.6→−39.4%；71.2→−53.0%
-#     → **哪个轴被限幅，哪个轴才改善**（两条可证伪预测全部命中），因果链钉死
-#   安全：三会话 × 两段无 guardian、无饱和（0%）、seg1 的 max|q| 全部低于 seg0（过冲减少旁证）
-
-# ★ MERGE 已执行（2026-09-11）：configs/static_feedforward_slew20_controller.json 的 slew_limit = 20.0
-#   旧值留档 configs/static_feedforward_slew2_controller.json（供历史复现）
-#   ⚠️ dynamic_nn_v1/v2 配置未动；日后重测须把它们的 slew_limit 也同步为 20.0，否则候选被自己限幅
-#   报告：NAS experiment_logs/R2_D3_slew/01_..._通过报告.md、02_d3_三轨迹确认_merge.md
-
-# --- 下一步（顺序不可颠倒）---
-# ① 重采 D0（干净标签；采前确认基线配置已是 slew 20.0）
-#       python -m [DELETED] <D0会话...>        # VIF / corr(q,q̈) 复核
-# ② 回查 级1.6 gain_cross（circle30 10s；该轨迹 lr 需求 253 offset/s 曾被限幅）
-# ③ 重测 D1 dynamic_nn_v1（先把 v1 配置 slew_limit 同步为 20.0，再与新基线对跑）
-# ④ 动态项架构改向：主导项是速度型（q̇ 标准化系数 +0.72；**仅 q̈ 的 R² 仅 0.11**）
-#       → 优先 g(q,q̇) / 分方向阻尼项，而非继续给 NN 加 q̈ 容量
-# ⑤ 工程收尾：model.fit_controller --slew-limit 改为 "offset/s ÷ LOOP_HZ" 换算口径
-#       （"每拍"单位会在 LOOP_HZ 变更时静默改变物理上限 —— 本次事故的根源之一）
-
-# ⚠️ 因限幅基线而需回查的历史结论（不推翻、只标注）：
-#   - 级1.6 gain_cross（circle30 10s，lr 需求 253 offset/s > 200）→ 否决结论需在 slew20 上重跑
-#   - 雪球 circle30（lr 253）→ 同上
-#   - D1 三轨迹（lr 需求 337/269/425，超限 25–54%）→ lr 判定需重跑
-#   - 级1 circle5 8s（lr 需求 ~46）→ 不受影响，无需重跑
-
-# ============================================================
-# D4：速度前馈（相位超前）u_ff = g(q_d + τ·q̇_d) —— 三轨迹 A/B
-# ============================================================
-# 依据（干净 D0 方差分解，开发机独立复核一致）：标准化 r ~ [q̇, q̈] →
-#   q̇ 系数 0.85~0.98、仅 q̇ R² 0.875~0.955；q̈ 系数 −0.04~−0.25、仅 q̈ R² 仅 0.02~0.30
-#   → **主导动态项是速度型**。τ 拟合（LOSO 留出）：fb 0.2142 s / lr 0.1894 s（逐折极稳）
-#     留出残差 RMSE 改善 −65.8% / −55.3%
-# 产物 configs/static_feedforward_lead_controller.json（唯一差异 = velocity_lead；τ=0 逐位退回基线）
-python -m collect.orchestrator --ab --eight 20 10 --duration 60 --servo-port COM5 --force-port COM3 --calibration calibrations/rig2.json --controller-config [DELETED] --baseline-controller-config configs/static_feedforward_slew20_controller.json --startup-fade 1.0
-python -m collect.orchestrator --ab --lissajous 20 20 0.1 0.16 --duration 60 --servo-port COM5 --force-port COM3 --calibration calibrations/rig2.json --controller-config [DELETED] --baseline-controller-config configs/static_feedforward_slew20_controller.json --startup-fade 1.0
-python -m collect.orchestrator --ab --variable-circle 20 10 --duration 60 --servo-port COM5 --force-port COM3 --calibration calibrations/rig2.json --controller-config [DELETED] --baseline-controller-config configs/static_feedforward_slew20_controller.json --startup-fade 1.0
 python -m valuation.evaluate <会话> --ab
-python -m valuation.phase_report <会话> --reversal --json
-# 判据：三轨迹两轴 MAE/RMSE 不劣于基线；换向过冲/等效延迟不恶化
-# 通过后可选细化：τ 按 q̇ 符号分正负（c⁺/c⁻，覆盖摩擦不对称）
+python -m valuation.phase_report <会话> --reversal --json     # 换向过冲 + 等效滞后
 
 # ============================================================
-# D5：slew20 干净标签上的 NN 动态前馈（v3，权重存 npz）
+# C. #4 时序动态前馈 —— 训练 / 验证 / 导出
 # ============================================================
-# 数据：重采的干净 D0 四会话（200340/200639/200928/201038，超限 0.0%、corr(标签,缺口)=0.000）
-# 两个候选（**基座不同**，权重都在 .npz，JSON 仅留引用）：
-#   A) [DELETED]        = g(q_d+τ·q̇_d) + NN   ← 推荐（速度前馈已是基座）
-#      离线：基座残余 RMSE fb 17.00/lr 24.43 → NN 后 7.87/8.00
-#   B) configs/dynamic_nn_v3_static.json = g_static(q_d) + NN   ← 对照（跳过 τ 项）
-#      离线：53.00/53.30 → 11.10/11.53
-# ⚠️ 两者离线指标**不可比**（基座残余不同）；唯一可比的是**实机 A/B**，且须与各自基座对跑。
-# 判据：≥3 轨迹（含 Eight）两轴 MAE/RMSE 不劣于各自基座；换向过冲/等效延迟不恶化
+# 离线（4 会话 LOSO 留出）：零修正 53.50/53.53 → 9.28/8.82（−82.7%/−83.5%）
+# 同协议 MLP(#3) 为 14.29/14.75 → 时序架构再降 35%/40%
+python -m model.fit_dynamic_seq --session <会话1> <会话2> <会话3> <会话4> --loso --train-all --out configs/dynamic_seq_v4.json --device auto
 
-# A) v3（速度前馈 + NN）vs 其基座（速度前馈）
-python -m collect.orchestrator --ab --eight 20 10 --duration 60 --servo-port COM5 --force-port COM3 --calibration calibrations/rig2.json --controller-config [DELETED] --baseline-controller-config [DELETED] --startup-fade 1.0
-python -m collect.orchestrator --ab --lissajous 20 20 0.1 0.16 --duration 60 (同上)
-python -m collect.orchestrator --ab --variable-circle 20 10 --duration 60 (同上)
-
-# B) v3_static（纯静态 + NN）vs 静态基线
-python -m collect.orchestrator --ab --eight 20 10 --duration 60 --servo-port COM5 --force-port COM3 --calibration calibrations/rig2.json --controller-config configs/dynamic_nn_v3_static.json --baseline-controller-config configs/static_feedforward_slew20_controller.json --startup-fade 1.0
-(同样再跑 lissajous / variable-circle)
-
-python -m valuation.evaluate <会话> --ab
-python -m valuation.phase_report <会话> --reversal --json
+# 训练↔运行时一致性 + cap=0 零回归（改代码后**必跑**；抓到过两处静默 skew）
+python -m model.verify_seq_runtime --config configs/dynamic_seq_v4.json --session <会话>
 
 # ============================================================
-# D4b：速度前馈【两种形式】A/B（加性线性 vs 相位超前）
+# D. 上机 A/B 协议
 # ============================================================
-# 形式对照（干净 D0 全量离线 RMSE，offset）：
-#   [fb] τ=0 51.80 | ① 加性 c=+2.370 → 13.60 | ② 相位超前 τ=0.214s → 16.92  ← ①更好
-#   [lr] τ=0 53.27 | ① 加性 c=+2.440 → 14.22 | ② 相位超前 τ=0.190s → 24.52  ← ①更好(差42%)
-# 原因：τ 式 = 系数 g′(q)·τ，带工作点依赖；数据支持的系数近似常数 → 多引入 q 依赖反而更差。
-# 产物 configs/static_feedforward_vel_controller.json（两式并存：velocity_gain / velocity_lead）
-# 用法：清掉不用的那一项即得到单形式配置；系数置零逐位退回静态基线。
-python -m collect.orchestrator --ab --eight 20 10 --duration 60 --servo-port COM5 --force-port COM3 --calibration calibrations/rig2.json --controller-config [DELETED] --baseline-controller-config configs/static_feedforward_slew20_controller.json --startup-fade 1.0
-python -m collect.orchestrator --ab --lissajous 20 20 0.1 0.16 --duration 60 (同上)
-python -m collect.orchestrator --ab --variable-circle 20 10 --duration 60 (同上)
-python -m valuation.evaluate <会话> --ab
-python -m valuation.phase_report <会话> --reversal --json
-# 判据：≥3 轨迹两轴不劣于静态基线；再比"加性 vs τ"哪一式更好（同场同轨迹）
+# ⚠️ 离线指标**不作合并依据**（已三次证伪）；必须**多轨迹**（单轨迹已三次误判）。
 
-# ============================================================
-# D6：时序动态前馈模型（GRU，全部传感器）—— 论文主模型上机 A/B
-# ============================================================
-# 模型：configs/dynamic_seq_v4.pt（torch.save）+ configs/dynamic_seq_v4.json
-#   u_ff = g_static(q_d) + clip(Δu_GRU, ±cap)
-#   Δu_GRU = GRU(L=10 拍) 吃 22 维特征：
-#            实测 q,q̇ | 期望 q_d,q̇_d,q̈_d | IMU 陀螺+加计 | 张力 ch1–4 | 上拍动作 u_{t-1}
-#   监督：Δu = u_recorded − u_base，**只在收敛段** |q−q_d|<1° 取样本（PID≈0 → 标签=被控对象真实需求）
-#   cap=0 → 逐位退回静态基座（已机器验证 16000/16000 拍一致）
-#
-# 离线（LOSO 4 会话留出，已跑）：
-#   零修正基线 53.50/53.53 → 时序模型 9.28/8.82（−82.7%/−83.5%）
-#   同协议 v3_static MLP 14.29/14.75 → 本模型再降 35%/40%
-#
-# ⚠️ 离线只做筛选，**不作合并依据**（已三次证伪：离线改进上机反而变差）。
-#    上机必须跑**多轨迹**（单轨迹已三次误判），并查"非指令频率注入"（D4a 否决原因）。
+# --- D-0 冒烟（必做）：#4 在 cap=0 下应与 #2 逐位一致（零回归保证）---
+python -m collect.orchestrator --ab --speed-ladder 20 --servo-port COM5 --force-port COM3 --calibration calibrations/rig2.json --controller-config configs/dynamic_seq_v4.json --baseline-controller-config configs/static_feedforward_slew20_controller.json --startup-fade 1.0
 
-# 第 0 步（必做）：cap=0 冒烟 —— 确认与纯静态基座逐位一致（零回归保证）
-#   两段应完全重合；若不一致，说明集成有问题，停在此步。
-python -m collect.orchestrator --ab --speed-ladder 20 --duration 60 --servo-port COM5 --force-port COM3 --calibration calibrations/rig2.json --controller-config configs/dynamic_seq_v4.json --baseline-controller-config configs/static_feedforward_slew20_controller.json --startup-fade 1.0
-
-# 第 1 步：开 cap=30（先用保守幅值；模型 Δu 典型 |中位| ~37 offset，cap 会截掉一部分）
+# --- D-1 打开 cap（保守起步；模型 Δu 典型中位 ~37 offset）---
 python - <<'PY'
 import json, pathlib
-p = pathlib.Path("configs/dynamic_seq_v4_cap30.json")
 d = json.loads(pathlib.Path("configs/dynamic_seq_v4.json").read_text(encoding="utf-8"))
 d["dynamic_seq"]["cap"] = 30.0
 d["_note"] = d["_note"].replace("cap=0", "cap=30")
-p.write_text(json.dumps(d, ensure_ascii=False, indent=2), encoding="utf-8")
-print("已写", p)
+pathlib.Path("configs/dynamic_seq_v4_cap30.json").write_text(json.dumps(d, ensure_ascii=False, indent=2), encoding="utf-8")
 PY
 python -m collect.orchestrator --ab --speed-ladder 20 --servo-port COM5 --force-port COM3 --calibration calibrations/rig2.json --controller-config configs/dynamic_seq_v4_cap30.json --baseline-controller-config configs/static_feedforward_slew20_controller.json --startup-fade 1.0
 python -m collect.orchestrator --ab --speed-ladder 30 (同上)
 python -m collect.orchestrator --ab --chirp 20 0.05 0.5 60 --duration 60 (同上)
 python -m collect.orchestrator --ab --random-fourier 20 --duration 120 (同上)
 python -m collect.orchestrator --ab --variable-circle 20 10 --duration 60 (同上)
-
 python -m valuation.evaluate <会话> --ab
 python -m valuation.phase_report <会话> --reversal --json
+python -m valuation.phase_report <会话> --spectrum --json     # **非指令频率**检查（D4a 否决原因）
 
-# 第 2 步：**非指令频率检查**（D4a 就是栽在这：NN 往 fb 注入 2.51 offset @0.2Hz = lr 频率）
-#   比 v3_static 当时的 2.51/1.93；加性形式仅 0.11/0.003。若本模型 >1 offset，判不通过。
-python -m valuation.phase_report <会话> --spectrum --json
+# --- D-2 与 #3 同场对比（论文需要"时序架构 ≥ MLP 架构"的实机证据）---
+python -m collect.orchestrator --ab --speed-ladder 20 --servo-port COM5 --force-port COM3 --calibration calibrations/rig2.json --controller-config configs/dynamic_nn_v3_static.json --baseline-controller-config configs/static_feedforward_slew20_controller.json --startup-fade 1.0
+(同样再跑 chirp / random-fourier / variable-circle)
 
-# 判据（全部满足才合并）
-#   1) ≥4 轨迹（含 speed-ladder 20/30、chirp、random-fourier）两轴 MAE/RMSE 不劣于静态基线
-#   2) 换向过冲不恶化（phase_report --reversal），最好改善
-#   3) 非指令频率注入 <1 offset
-#   4) cap=0 与静态基线逐位一致（第 0 步）
-#   5) 与 v3_static 同场对比：至少不劣（论文需要"时序架构 ≥ MLP 架构"的证据）
+# 判据（全部满足才合并 / 才写进论文）
+#   1) ≥4 轨迹（含 speed-ladder 20/30、chirp、random-fourier）两轴 MAE/RMSE 不劣于静态基线 #2
+#   2) 换向过冲（phase_report --reversal）不恶化，最好改善
+#   3) 非指令频率注入 <1 offset（D4a 就是栽在这：NN 注入 2.51 offset @0.2Hz）
+#   4) cap=0 与 #2 逐位一致（D-0）
+#   5) 与 #3 同场：至少不劣
+
+# ============================================================
+# E. #3 NN 动态前馈（对照架构）
+# ============================================================
+python -m model.fit_dynamic_nn --session <会话1> <会话2> <会话3> <会话4> --base-config configs/static_feedforward_slew20_controller.json --qddot --train-all --out configs/dynamic_nn_v3_static.json --threshold 1.0 --epochs 400
+
+# 传感器特征消融（论文表：张力 −15~17%，IMU 单独无效；含**同维数打乱对照**）
+python -m model.ab_sensor_features --session <会话1> <会话2> <会话3> <会话4>
