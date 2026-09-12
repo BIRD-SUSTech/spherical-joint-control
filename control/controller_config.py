@@ -35,14 +35,18 @@ class ControllerConfig:
     velocity_lead: dict | None = None     # {"fb": tau_s, "lr": tau_s} 速度前馈相位超前（秒）
     dynamic_nn: dict | None = None        # 动态残差 MLP（内联形式）：归一化参数 + 层权重
     dynamic_nn_npz: str | None = None     # 动态残差 MLP 权重文件（npz）；load 时载入 dynamic_nn
+    dynamic_seq: dict | None = None       # 反解 F 模式（GRU 时序模型 + 运行时反解）；见 _init_seq
     slew_limit: float | None = None       # u_ff 每拍变化上限（offset/拍），None=不限
     hysteresis: dict | None = None        # {"fb": h, "lr": h} 迟滞补偿（offset），级 2
     # 未来扩展字段在此追加，load 时读取对应 key
 
     _last_uff: tuple = field(default=None, init=False, repr=False)  # 上次前馈输出（slew 用）
+    _seq: object = field(default=None, init=False, repr=False)      # SeqRuntime（torch）
+    _seq_stat: dict = field(default=None, init=False, repr=False)   # 时序项运行统计（诊断用）
 
     def __post_init__(self):
         self._last_uff = None
+        self._seq_stat = {"n": 0, "du_fb": [], "du_lr": [], "skip": 0}
 
     @classmethod
     def none(cls) -> "ControllerConfig":
@@ -61,6 +65,7 @@ class ControllerConfig:
             velocity_lead=data.get("velocity_lead"),
             dynamic_nn=data.get("dynamic_nn"),
             dynamic_nn_npz=data.get("dynamic_nn_npz"),
+            dynamic_seq=data.get("dynamic_seq"),
             slew_limit=data.get("slew_limit"),
             hysteresis=data.get("hysteresis"),
         )
@@ -70,17 +75,77 @@ class ControllerConfig:
             if not ref.is_absolute():
                 ref = cfg_path.parent / ref
             cfg.dynamic_nn = load_nn_npz(ref)
+        if cfg.dynamic_seq:
+            cfg._init_seq(cfg_path.parent)
         return cfg
+
+    # ------------------------------------------------------------------
+    # §8.4 反解 F 模式：GRU 时序模型 + 运行时反解（纯模型动态前馈）
+    # ------------------------------------------------------------------
+    def _init_seq(self, base_dir: Path) -> None:
+        """载入 torch 时序模型 + 建因果特征缓冲。配置见 configs/*.json 的 dynamic_seq 段。
+
+        dynamic_seq 字段：
+            model    模型文件（.pt，torch.save）路径，相对配置文件目录
+            seq_len  历史窗长（拍），须与训练一致（缺省 10）
+            vel_w    q̇ 因果估计器窗长（拍），须与训练一致（缺省 31）
+            dt       控制周期秒（缺省 0.01）；仅用于 q̇ 核
+            device   "cpu"（缺省，控制回路不需要 GPU）| "auto" | "cuda"
+            cap      修正量幅值帽（offset）；**0 = 逐位退回静态前馈**（缺省 0，安全）
+        """
+        from control.forward_seq_runtime import SeqRuntime
+        ref = Path(self.dynamic_seq["model"])
+        if not ref.is_absolute():
+            ref = base_dir / ref
+        self._seq = SeqRuntime(ref,
+                               seq_len=int(self.dynamic_seq.get("seq_len", 10)),
+                               vel_w=int(self.dynamic_seq.get("vel_w", 31)),
+                               dt=float(self.dynamic_seq.get("dt", 0.01)),
+                               device=str(self.dynamic_seq.get("device", "cpu")))
+        self._seq_ref = str(ref)
+
+    def push_runtime_state(self, q_meas_fb, q_meas_lr, u_prev_fb, u_prev_lr,
+                           q_d_fb=0.0, q_d_lr=0.0,
+                           gyro=None, acc=None, force=None) -> bool:
+        """每拍喂入【当前测量 + 期望轨迹 + 上一拍实发动作】→ 因果特征窗。
+
+        必须在 feedforward() **之前**调用（仅 dynamic_seq 启用时有效）。
+        u_prev 必须是**实际下发**的总 offset（u_ff+u_fb），与训练标签语义一致。
+        返回 False = 本拍不可用（缓冲未满/未启用）→ 自动退回静态前馈。
+        """
+        if self._seq is None:
+            return False
+        self._seq.push(q_meas_fb, q_meas_lr, q_d_fb=q_d_fb, q_d_lr=q_d_lr,
+                       u_prev=(u_prev_fb, u_prev_lr),
+                       gyro=(0.0, 0.0, 0.0) if gyro is None else gyro,
+                       acc=(0.0, 0.0, 0.0) if acc is None else acc,
+                       force=(0.0, 0.0, 0.0, 0.0) if force is None else force)
+        return self._seq.ready()
+
+    def seq_stats(self) -> dict:
+        """时序项运行统计（诊断：修正量分布 / 未生效拍数）。"""
+        st = dict(self._seq_stat)
+        for k in ("du_fb", "du_lr"):
+            v = st.pop(k, [])
+            if v:
+                import statistics as _s
+                st[k + "_med"] = _s.median(v)
+                st[k + "_p95"] = sorted(v)[int(0.95 * (len(v) - 1))]
+                st[k + "_max"] = max(v)
+                st[k + "_absmax"] = max(abs(x) for x in v)
+        return st
 
     def has_feedforward(self) -> bool:
         """是否启用前馈。"""
         return (self.direction_gains is not None or self.gain_poly is not None
                 or self.gain_cross is not None or self.dynamic_nn is not None
-                or self.velocity_gain is not None or self.velocity_lead is not None)
+                or self.velocity_gain is not None or self.velocity_lead is not None
+                or self.dynamic_seq is not None)
 
     def feedforward(self, q_d_fb: float, q_d_lr: float,
                     qdot_d_fb: float = 0.0, qdot_d_lr: float = 0.0,
-                    qddot_d_fb: float = 0.0, qddot_d_lr: float = 0.0) -> tuple[float, float]:
+                    qddot_d_fb: float = 0.0, qddot_d_lr: float = 0.0,
+                    gyro=None, acc=None, force=None) -> tuple[float, float]:
         """前馈反解：目标关节角（度）→ 差分 offset（含迟滞 + slew 整形）。
 
         静态基座 = own(q_self) + 交叉项 c(q_other)；own 依次回退
@@ -114,12 +179,39 @@ class ControllerConfig:
 
         # §8.4 D1：学习型动态残差（**残差式**，只加修正量；缺省/零权重=退回稳态前馈）
         if self.dynamic_nn is not None:
-            feats = [q_d_fb, q_d_lr, qdot_d_fb, qdot_d_lr]
-            if int(self.dynamic_nn.get("n_in", 4)) >= 6:   # v2：含 q̈（T1/D0 实证有效）
-                feats += [qddot_d_fb, qddot_d_lr]
+            src = {"q_d_fb": q_d_fb, "q_d_lr": q_d_lr,
+                   "qdot_d_fb": qdot_d_fb, "qdot_d_lr": qdot_d_lr,
+                   "qddot_d_fb": qddot_d_fb, "qddot_d_lr": qddot_d_lr}
+            if gyro is not None:
+                src.update(zip(("gyro_x", "gyro_y", "gyro_z"), gyro))
+            if acc is not None:
+                src.update(zip(("acc_x", "acc_y", "acc_z"), acc))
+            if force is not None:
+                src.update(zip(("ch1", "ch2", "ch3", "ch4"), force))
+            names = self.dynamic_nn.get("features")
+            if names:
+                # 按**特征名**取值（单一事实源）→ 支持 v4(含 IMU/力) 且不怕顺序变化
+                feats = [float(src.get(str(nm), 0.0)) for nm in names]
+            else:                                          # 旧模型无 features 字段：位置式
+                feats = [q_d_fb, q_d_lr, qdot_d_fb, qdot_d_lr]
+                if int(self.dynamic_nn.get("n_in", 4)) >= 6:
+                    feats += [qddot_d_fb, qddot_d_lr]
             r_fb, r_lr = _nn_forward(self.dynamic_nn, feats)
             u_fb += r_fb
             u_lr += r_lr
+
+        # §8.4 时序动态前馈（论文主模型）：u_ff = u_base + clip(Δu_GRU, ±cap)
+        if self._seq is not None:
+            cap = float(self.dynamic_seq.get("cap", 0.0))
+            du = self._seq.predict() if cap > 0.0 else None
+            if du is not None:
+                u_fb += _clip(du[0], cap)
+                u_lr += _clip(du[1], cap)
+                self._seq_stat["n"] += 1
+                self._seq_stat["du_fb"].append(du[0])
+                self._seq_stat["du_lr"].append(du[1])
+            else:
+                self._seq_stat["skip"] += 1
 
         # 级 2：迟滞补偿 h·sign(q̇_d)
         if self.hysteresis is not None:
@@ -133,6 +225,13 @@ class ControllerConfig:
                 u_lr = _slew(self._last_uff[1], u_lr, self.slew_limit)
         self._last_uff = (u_fb, u_lr)
         return u_fb, u_lr
+
+
+def _clip(v: float, cap: float) -> float:
+    """对称幅值帽：cap<=0 → 恒 0（反解退回静态前馈的逐位保证）。"""
+    if cap <= 0.0:
+        return 0.0
+    return max(-cap, min(cap, v))
 
 
 def _poly(coeffs, x):

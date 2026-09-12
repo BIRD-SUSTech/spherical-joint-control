@@ -50,3 +50,4 @@ archive/data_collection/sessions/
 archive/data_collection/sessions_test/
 archive/data_collection/outputs/
 archive/feedforward/outputs/
+*.pt.tmp

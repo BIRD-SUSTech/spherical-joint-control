@@ -48,6 +48,7 @@ class ImuCollector:
         self._async_stop = None
         self._dropped_count = 0
         self._row_count = 0
+        self.latest = None          # 最新一帧（控制回路读取；None=尚未收到）
 
     def start(self) -> None:
         self._thread = threading.Thread(target=self._run_asyncio_loop,
@@ -156,6 +157,7 @@ class ImuCollector:
         if packet is None:
             return
         self._row_count += 1
+        self.latest = packet          # 控制回路用的最新快照（不占队列，供时序前馈取 IMU）
         try:
             self._output_queue.put_nowait(packet)
         except queue.Full:

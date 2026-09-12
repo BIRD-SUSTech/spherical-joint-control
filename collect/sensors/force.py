@@ -67,6 +67,7 @@ class ForceCollector:
         self._dropped_count = 0
         self._error_count = 0
         self._sample_count = 0
+        self.latest = None          # 最新一帧（控制回路读取；None=尚未收到）
         self._t_first = None
         self._t_last = None
 
@@ -143,6 +144,7 @@ class ForceCollector:
                     self._t_first = now
                 self._t_last = now
                 self._sample_count += 1
+                self.latest = data      # 控制回路用的最新快照（供时序前馈取张力）
                 try:
                     self._output_queue.put_nowait(data)
                 except queue.Full:

@@ -44,7 +44,7 @@ from control.trajectory import make_traj, trajectory_duration
 from control.pid import PIDController
 from excite.guardian import Guardian
 from excite.signals import (default_segments, extended_segments, extreme_segments,
-                            large_angle_segments, sample_segment)
+                            ident_segments, large_angle_segments, sample_segment)
 from hardware.mocap import MockMocap, MocapReader, Pose
 from hardware.servo import MockServoBus, ServoBus
 
@@ -130,6 +130,8 @@ def parse_args() -> argparse.Namespace:
     p.add_argument("--out", default="collect/logs", help="会话根目录")
     p.add_argument("--segment-id", type=int, default=0, help="闭环数据段 id（默认 0）")
     p.add_argument("--open-loop", action="store_true", help="开环激励模式（替代闭环）")
+    p.add_argument("--ident", action="store_true",
+                   help="辨识专用激励段集（u 外生宽带多正弦；反解 F 模式必需）")
     p.add_argument("--open-loop-fs", type=float, default=100.0, help="开环激励频率 Hz")
     p.add_argument("--open-loop-duration", type=float, default=None,
                    help="开环总时长上限 s（缺省=跑完所有激励段）")
@@ -394,6 +396,7 @@ class Orchestrator:
         next_t = t0
         prev_t_fb = prev_t_lr = None
         prev_qdot_fb = prev_qdot_lr = 0.0
+        prev_u = None          # 上一拍【实发】总 offset（时序前馈的因果输入）
 
         while not self._stop_event.is_set():
             if self._guardian is not None and self._guardian.is_triggered:
@@ -423,11 +426,26 @@ class Orchestrator:
             out_lr = int(pid_lr.calculate(curr_lr))
             ctrl = controller if controller is not None else self._controller
             if ctrl.has_feedforward():
+                # §8.4 时序动态前馈：先把【当前测量 + 期望轨迹 + 上一拍实发动作】喂进因果特征窗。
+                # 必须在 feedforward() 之前调用；u_prev 用**实际下发**的 out_fb/out_lr（首拍用当前 PID 输出占位）。
+                if getattr(ctrl, "_seq", None) is not None:
+                    kw = {}
+                    if self._imu is not None and getattr(self._imu, "latest", None) is not None:
+                        pk = self._imu.latest
+                        kw["gyro"] = (pk.gyro_x, pk.gyro_y, pk.gyro_z)
+                        kw["acc"] = (pk.ax_no_g, pk.ay_no_g, pk.az_no_g)
+                    if self._force is not None and getattr(self._force, "latest", None) is not None:
+                        fs = self._force.latest
+                        kw["force"] = (fs.ch1, fs.ch2, fs.ch3, fs.ch4)
+                    uf, ul = prev_u if prev_u is not None else (out_fb, out_lr)
+                    ctrl.push_runtime_state(curr_fb, curr_lr, uf, ul,
+                                            q_d_fb=t_fb, q_d_lr=t_lr, **kw)
                 ff_fb, ff_lr = ctrl.feedforward(t_fb, t_lr, qdot_fb, qdot_lr,
                                                 qddot_fb, qddot_lr)
                 fade = min(1.0, t / self._args.startup_fade) if self._args.startup_fade > 0 else 1.0
                 out_fb = int(fade * ff_fb + out_fb)
                 out_lr = int(fade * ff_lr + out_lr)
+            prev_u = (out_fb, out_lr)      # 下一拍作为 u_prev（实际下发值，与训练标签同语义）
             self._send_control(out_fb, out_lr, curr_fb, curr_lr)
 
             state = ServoState(
@@ -671,7 +689,9 @@ def _trajectory_info(args) -> dict:
 
 
 def _pick_segments(args):
-    """选择开环激励段集：extreme > large-angle > extended > default。"""
+    """选择开环激励段集：ident > extreme > large-angle > extended > default。"""
+    if args.ident:
+        return ident_segments()
     if args.extreme:
         return extreme_segments()
     if args.large_angle:

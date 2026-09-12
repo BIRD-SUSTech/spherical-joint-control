@@ -30,7 +30,44 @@ from control.controller_config import ControllerConfig
 
 FEATURES_V1 = ["q_d_fb", "q_d_lr", "qdot_d_fb", "qdot_d_lr"]
 FEATURES_V2 = FEATURES_V1 + ["qddot_d_fb", "qddot_d_lr"]
+FEATURES_IMU = ["gyro_x", "gyro_y", "gyro_z", "acc_x", "acc_y", "acc_z"]
+FEATURES_FORCE = ["ch1", "ch2", "ch3", "ch4"]
+# 特征名 → CSV 实际列名（单一事实源；运行时按特征名取值，故此处只影响训练取数）
+SENSOR_COLS = {"gyro_x": "gyro_x_dps", "gyro_y": "gyro_y_dps", "gyro_z": "gyro_z_dps",
+               "acc_x": "ax_no_g_mps2", "acc_y": "ay_no_g_mps2", "acc_z": "az_no_g_mps2",
+               "ch1": "ch1", "ch2": "ch2", "ch3": "ch3", "ch4": "ch4"}
 FEATURES = FEATURES_V1   # 兼容旧引用（默认 v1）
+
+
+def feature_names(use_qddot: bool, use_imu: bool = False, use_force: bool = False) -> list:
+    """特征顺序的**单一事实源**：训练 / 导出 / 运行时三处必须一致。"""
+    names = list(FEATURES_V2 if use_qddot else FEATURES_V1)
+    if use_imu:
+        names += FEATURES_IMU
+    if use_force:
+        names += FEATURES_FORCE
+    return names
+
+
+def _load_sensor(session_dir: Path, filename: str, cols: list):
+    """读一个传感器 CSV → (ts_ms 排序后, vals (n,len(cols)))。缺文件→None。"""
+    p = session_dir / filename
+    if not p.exists():
+        return None
+    ts, vals = [], []
+    with open(p, newline="", encoding="utf-8") as f:
+        for row in csv.DictReader(f):
+            try:
+                ts.append(int(row["pc_receive_unix_time_ms"]))
+                vals.append([float(row[c]) for c in cols])
+            except (KeyError, ValueError):
+                continue
+    if not ts:
+        return None
+    ts = np.asarray(ts)
+    vals = np.asarray(vals)
+    o = np.argsort(ts)
+    return ts[o], vals[o]
 
 
 # ---------------------------------------------------------------------------
@@ -71,8 +108,13 @@ def base_static_u(cfg: ControllerConfig, q_fb: float, q_lr: float,
 
 
 def load_session_features(csv_path: Path, cfg: ControllerConfig, threshold: float,
-                          include_all: bool = False, use_qddot: bool = False):
-    """读一个会话 → (features (n,4), residual (n,2), seg (n,))。
+                          include_all: bool = False, use_qddot: bool = False,
+                          use_imu: bool = False, use_force: bool = False):
+    """读一个会话 → (features (n,k), residual (n,2), seg (n,))。
+
+    use_imu/use_force=True 时，从同目录 imu_data.csv / force_data.csv **按时间戳最近邻**
+    对齐后追加 6/4 维传感器特征（实测状态）。注意：这会把本模型从"纯前馈"变成
+    **含实测状态反馈的项**，需单独稳定性分析 + 非指令频率检查（见 D4a 否决报告）。
 
     只取收敛段（|current−target| < threshold 两轴都满足）：此时 `u_总 ≈ 目标状态所需 u`，
     残差 r = u_总 − g_static(q_d) 即"静态前馈没吃掉的动态量"。
@@ -97,7 +139,18 @@ def load_session_features(csv_path: Path, cfg: ControllerConfig, threshold: floa
                 ul = float(row["servo_left_right_offset"])
             except (KeyError, ValueError):
                 continue
-            rows_all.setdefault(int(sid), []).append((ts, tf, tl, cf, cl, uf, ul))
+            rows_all.setdefault(int(sid), []).append(
+                (ts, tf, tl, cf, cl, uf, ul, int(row["pc_receive_unix_time_ms"])))
+
+    sdir = csv_path.parent
+    imu = _load_sensor(sdir, "imu_data.csv",
+                       [SENSOR_COLS[c] for c in FEATURES_IMU]) if use_imu else None
+    fo = _load_sensor(sdir, "force_data.csv",
+                      [SENSOR_COLS[c] for c in FEATURES_FORCE]) if use_force else None
+    if use_imu and imu is None:
+        print(f"警告：{sdir.name} 无 imu_data.csv → IMU 特征置 0", file=sys.stderr)
+    if use_force and fo is None:
+        print(f"警告：{sdir.name} 无 force_data.csv → 力特征置 0", file=sys.stderr)
 
     feats, res, seg_ids = [], [], []
     for sid, rows in rows_all.items():
@@ -111,6 +164,18 @@ def load_session_features(csv_path: Path, cfg: ControllerConfig, threshold: floa
         cl = np.array([r[4] for r in rows])
         uf = np.array([r[5] for r in rows])
         ul = np.array([r[6] for r in rows])
+        tsms = np.array([r[7] for r in rows])
+        # 传感器最近邻对齐（与 servo 时钟）
+        if imu is not None:
+            ii = np.clip(np.searchsorted(imu[0], tsms, side="left"), 0, len(imu[0]) - 1)
+            ii = np.where((ii > 0) & (np.abs(imu[0][np.maximum(ii - 1, 0)] - tsms)
+                                      < np.abs(imu[0][ii] - tsms)), ii - 1, ii)
+            imu_v = imu[1][ii]
+        if fo is not None:
+            fi = np.clip(np.searchsorted(fo[0], tsms, side="left"), 0, len(fo[0]) - 1)
+            fi = np.where((fi > 0) & (np.abs(fo[0][np.maximum(fi - 1, 0)] - tsms)
+                                      < np.abs(fo[0][fi] - tsms)), fi - 1, fi)
+            fo_v = fo[1][fi]
         # 参考速度：在【全序列】上差分（目标平滑 → 干净，且不是实测差分）
         dt = np.median(np.diff(ts)) if len(ts) > 1 else 0.01
         vf = np.gradient(tf, dt)
@@ -123,10 +188,12 @@ def load_session_features(csv_path: Path, cfg: ControllerConfig, threshold: floa
                                     or abs(cl[i] - tl[i]) >= threshold):
                 continue
             bf, bl = base_static_u(cfg, tf[i], tl[i], vf[i], vl[i])
-            if use_qddot:
-                feats.append([tf[i], tl[i], vf[i], vl[i], af[i], al[i]])
-            else:
-                feats.append([tf[i], tl[i], vf[i], vl[i]])
+            row = [tf[i], tl[i], vf[i], vl[i]] + ([af[i], al[i]] if use_qddot else [])
+            if imu is not None:
+                row += list(imu_v[i])
+            if fo is not None:
+                row += list(fo_v[i])
+            feats.append(row)
             res.append([uf[i] - bf, ul[i] - bl])
             seg_ids.append(sid)
     return np.array(feats), np.array(res), np.array(seg_ids)
@@ -176,7 +243,7 @@ def train_mlp(X_tr, R_tr, X_va, R_va, hidden=32, depth=2, epochs=300, lr=1e-3, s
     return net, (in_mean, in_std, out_mean, out_std), hist
 
 
-def export_nn(net, norm, clip: float) -> dict:
+def export_nn(net, norm, clip: float, features=None) -> dict:
     """torch 模型 → dict（层权重 + 归一化 + 限幅），供运行时 numpy 前向。
 
     **关键**：把输出反归一化（out_mean/out_std）**折叠进最后一层**，导出 out_mean=0/out_std=1。
@@ -184,6 +251,7 @@ def export_nn(net, norm, clip: float) -> dict:
     若保留 out_mean 在反归一化里，置零会得到常数 out_mean ≠ 0，保证就失效。
     """
     in_mean, in_std, out_mean, out_std = norm
+    features = None
     layers = []
     for m in net:
         if hasattr(m, "weight"):  # nn.Linear
@@ -198,8 +266,9 @@ def export_nn(net, norm, clip: float) -> dict:
         "in_mean": in_mean.tolist(), "in_std": in_std.tolist(),
         "out_mean": [0.0] * len(out_mean), "out_std": [1.0] * len(out_std),
         "layers": layers, "act": "tanh", "clip": clip,
-        "n_in": int(len(in_mean)),                       # 4=v1(无q̈) / 6=v2(含q̈)
-        "features": FEATURES_V2 if len(in_mean) >= 6 else FEATURES_V1,
+        "n_in": int(len(in_mean)),                       # 4=v1 / 6=v2(+q̈) / +6(+IMU) / +4(+力)
+        "features": [str(x) for x in (features if features else
+                                      (FEATURES_V2 if len(in_mean) >= 6 else FEATURES_V1))],
     }
 
 
@@ -223,6 +292,10 @@ def main() -> int:
     ap.add_argument("--seed", type=int, default=0)
     ap.add_argument("--train-all", action="store_true",
                     help="生产模式：用全部会话训练（随机 15%% 做早停验证），不浪费一个会话做留出")
+    ap.add_argument("--imu", action="store_true",
+                    help="输入加 IMU 陀螺+加计（6 维，实测）——注意：会变成含实测状态的反馈项")
+    ap.add_argument("--force", action="store_true",
+                    help="输入加张力 ch1–ch4（4 维，实测）——注意：同上")
     ap.add_argument("--qddot", action="store_true",
                     help="输入加 q̈_d（v2；D0 实证：LOSO 留出 R² +0.02~+0.10，远超双控制组）")
     ap.add_argument("--clip", type=float, default=None,
@@ -247,7 +320,8 @@ def main() -> int:
 
     per_session = []
     for p in paths:
-        X, R, seg = load_session_features(p, cfg, args.threshold, use_qddot=args.qddot)
+        X, R, seg = load_session_features(p, cfg, args.threshold, use_qddot=args.qddot,
+                                         use_imu=args.imu, use_force=args.force)
         print(f"{p.parent.name}: 收敛样本 {len(X)}")
         if len(X):
             per_session.append((X, R))
@@ -292,7 +366,9 @@ def main() -> int:
         print(f"  [{ax}] 留出残差 RMSE {r0:.2f} → {r1:.2f}（{100*(r1/r0-1):+.1f}%）  R²={r2:.3f}")
 
     clip = args.clip if args.clip is not None else float(3.0 * np.abs(R_tr).max())
-    net_dict = export_nn(net, norm, clip)
+    feat_names = feature_names(args.qddot, args.imu, args.force)
+    net_dict = export_nn(net, norm, clip, features=feat_names)
+    print(f"特征（{len(feat_names)} 维）: {', '.join(feat_names)}")
 
     from control.controller_config import save_nn_npz
     out = Path(args.out)
