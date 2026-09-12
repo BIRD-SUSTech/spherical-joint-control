@@ -312,3 +312,54 @@ python -m collect.orchestrator --ab --variable-circle 20 10 --duration 60 (同�
 python -m valuation.evaluate <会话> --ab
 python -m valuation.phase_report <会话> --reversal --json
 # 判据：≥3 轨迹两轴不劣于静态基线；再比"加性 vs τ"哪一式更好（同场同轨迹）
+
+# ============================================================
+# D6：时序动态前馈模型（GRU，全部传感器）—— 论文主模型上机 A/B
+# ============================================================
+# 模型：configs/dynamic_seq_v4.pt（torch.save）+ configs/dynamic_seq_v4.json
+#   u_ff = g_static(q_d) + clip(Δu_GRU, ±cap)
+#   Δu_GRU = GRU(L=10 拍) 吃 22 维特征：
+#            实测 q,q̇ | 期望 q_d,q̇_d,q̈_d | IMU 陀螺+加计 | 张力 ch1–4 | 上拍动作 u_{t-1}
+#   监督：Δu = u_recorded − u_base，**只在收敛段** |q−q_d|<1° 取样本（PID≈0 → 标签=被控对象真实需求）
+#   cap=0 → 逐位退回静态基座（已机器验证 16000/16000 拍一致）
+#
+# 离线（LOSO 4 会话留出，已跑）：
+#   零修正基线 53.50/53.53 → 时序模型 9.28/8.82（−82.7%/−83.5%）
+#   同协议 v3_static MLP 14.29/14.75 → 本模型再降 35%/40%
+#
+# ⚠️ 离线只做筛选，**不作合并依据**（已三次证伪：离线改进上机反而变差）。
+#    上机必须跑**多轨迹**（单轨迹已三次误判），并查"非指令频率注入"（D4a 否决原因）。
+
+# 第 0 步（必做）：cap=0 冒烟 —— 确认与纯静态基座逐位一致（零回归保证）
+#   两段应完全重合；若不一致，说明集成有问题，停在此步。
+python -m collect.orchestrator --ab --speed-ladder 20 --duration 60 --servo-port COM5 --force-port COM3 --calibration calibrations/rig2.json --controller-config configs/dynamic_seq_v4.json --baseline-controller-config configs/static_feedforward_controller.json --startup-fade 1.0
+
+# 第 1 步：开 cap=30（先用保守幅值；模型 Δu 典型 |中位| ~37 offset，cap 会截掉一部分）
+python - <<'PY'
+import json, pathlib
+p = pathlib.Path("configs/dynamic_seq_v4_cap30.json")
+d = json.loads(pathlib.Path("configs/dynamic_seq_v4.json").read_text(encoding="utf-8"))
+d["dynamic_seq"]["cap"] = 30.0
+d["_note"] = d["_note"].replace("cap=0", "cap=30")
+p.write_text(json.dumps(d, ensure_ascii=False, indent=2), encoding="utf-8")
+print("已写", p)
+PY
+python -m collect.orchestrator --ab --speed-ladder 20 --servo-port COM5 --force-port COM3 --calibration calibrations/rig2.json --controller-config configs/dynamic_seq_v4_cap30.json --baseline-controller-config configs/static_feedforward_controller.json --startup-fade 1.0
+python -m collect.orchestrator --ab --speed-ladder 30 (同上)
+python -m collect.orchestrator --ab --chirp 20 0.05 0.5 60 --duration 60 (同上)
+python -m collect.orchestrator --ab --random-fourier 20 --duration 120 (同上)
+python -m collect.orchestrator --ab --variable-circle 20 10 --duration 60 (同上)
+
+python -m valuation.evaluate <会话> --ab
+python -m valuation.phase_report <会话> --reversal --json
+
+# 第 2 步：**非指令频率检查**（D4a 就是栽在这：NN 往 fb 注入 2.51 offset @0.2Hz = lr 频率）
+#   比 v3_static 当时的 2.51/1.93；加性形式仅 0.11/0.003。若本模型 >1 offset，判不通过。
+python -m valuation.phase_report <会话> --spectrum --json
+
+# 判据（全部满足才合并）
+#   1) ≥4 轨迹（含 speed-ladder 20/30、chirp、random-fourier）两轴 MAE/RMSE 不劣于静态基线
+#   2) 换向过冲不恶化（phase_report --reversal），最好改善
+#   3) 非指令频率注入 <1 offset
+#   4) cap=0 与静态基线逐位一致（第 0 步）
+#   5) 与 v3_static 同场对比：至少不劣（论文需要"时序架构 ≥ MLP 架构"的证据）
