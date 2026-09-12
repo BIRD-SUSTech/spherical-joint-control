@@ -12,7 +12,7 @@
 
 用法：
     python -m model.fit_dynamic_nn --session <A> <B> <C> \
-        --base-config configs/static_feedforward_controller.json \
+        --base-config configs/static_feedforward_slew20_controller.json \
         --out configs/dynamic_nn_v1.json --epochs 300 --threshold 0.5
 """
 

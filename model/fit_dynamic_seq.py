@@ -37,6 +37,7 @@
 from __future__ import annotations
 
 import argparse
+import csv
 import json
 import sys
 from pathlib import Path
@@ -45,8 +46,164 @@ import numpy as np
 
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
-from model.fit_forward_seq import load_session, _poly_est          # noqa: E402
 from model.seq_model import fit, save_model, pick_device            # noqa: E402
+
+# ---------------------------------------------------------------------------
+# 数据加载：四路传感器按 servo 时钟最近邻对齐 → 逐拍特征
+# （自 model/fit_forward_seq.py 移入；反解 F 路线已否决，只保留此处需要的数据层）
+# ---------------------------------------------------------------------------
+
+_X_FEAT = 16          # load_session 内部布局：q(2) q̇(2) u_prev(2) gyro(3) acc(3) ch(4)
+
+def _rows(path: Path):
+    if not path.exists():
+        return None
+    with open(path, newline="", encoding="utf-8") as f:
+        return list(csv.DictReader(f))
+
+
+def _rows_cols(path: Path, cols):
+    rows = _rows(path)
+    if not rows:
+        return None, None
+    return rows, cols
+
+
+def _align(rows, cols):
+    ts = np.array([int(r["pc_receive_unix_time_ms"]) for r in rows])
+    vals = np.array([[float(r[c]) for c in cols] for r in rows])
+    o = np.argsort(ts)
+    return ts[o], vals[o]
+
+
+def _smooth(x, w):
+    """滑动均值（w 拍）——压动捕微分噪声。"""
+    if w <= 1:
+        return x
+    k = np.ones(w) / w
+    return np.convolve(x, k, mode="same")
+
+
+def _d1(x, dt, h):
+    """中心一阶差分（±h 拍）。"""
+    v = np.zeros_like(x)
+    v[h:-h] = (x[2 * h:] - x[:-2 * h]) / (2 * h * dt)
+    v[:h] = v[h]; v[-h:] = v[-h - 1]
+    return v
+
+
+def _d2(x, dt, h):
+    """中心二阶差分（±h 拍）→ 加速度估计（低噪声版）。"""
+    a = np.zeros_like(x)
+    a[h:-h] = (x[2 * h:] - 2 * x[h:-h] + x[:-2 * h]) / (h * dt) ** 2
+    a[:h] = a[h]; a[-h:] = a[-h - 1]
+    return a
+
+
+def _poly_pinv(w, dt):
+    """因果零滞后最小二乘核：(3,w)，行 = [q, q̇, q̈] 在 τ=0 处的估计。
+
+    对【过去 w 拍】拟合 q(τ)=a+bτ+cτ²/2（τ≤0 为过去），取 τ=0 处系数。
+    因果、零相位滞后；代价是噪声增益随 w 增大。
+    """
+    j = np.arange(w)
+    tau = (j - (w - 1)) * dt
+    A = np.stack([np.ones(w), tau, tau ** 2 / 2], axis=1)
+    return np.linalg.pinv(A)
+
+
+def _poly_est(x, dt, w):
+    """→ (q_est, qdot_est, qddot_est)；前 w-1 拍用首个有效值填充（启动瞬态）。"""
+    M = _poly_pinv(w, dt)
+    win = np.lib.stride_tricks.sliding_window_view(x, w)
+    e = win @ M.T
+    out = np.empty((len(x), 3))
+    out[w - 1:] = e
+    out[:w - 1] = e[0]
+    return out[:, 0], out[:, 1], out[:, 2]
+
+
+def load_session(session: Path, smooth: int = 15, acc_h: int = 10,
+                 vel_mode: str = "central", vel_w: int = 31, with_aux: bool = False,
+                 use_u_hist: bool = True, horizon: int = 0):
+    """→ 逐拍 (X (n,16), Y (n,2)=Δq̇, seg_id (n,))；四路最近邻对齐到 servo 时钟。"""
+    srows = [r for r in (_rows(session / "servo_data.csv") or [])
+             if r.get("segment_id", "") not in ("", "-1", None)]
+    if len(srows) < 200:
+        return None
+    per_seg: dict[int, list] = {}
+    for r in srows:
+        per_seg.setdefault(int(r["segment_id"]), []).append(r)
+
+    imu = _align(*_rows_cols(session / "imu_data.csv",
+                             ["gyro_x_dps", "gyro_y_dps", "gyro_z_dps",
+                              "ax_no_g_mps2", "ay_no_g_mps2", "az_no_g_mps2"]))
+    fo = _align(*_rows_cols(session / "force_data.csv", ["ch1", "ch2", "ch3", "ch4"]))
+
+    X, Y, S = [], [], []
+    AUX = {"q": [], "q_d": [], "u": [], "qddot_causal": [], "sid": [], "t": []}
+    for sid, rows in per_seg.items():
+        rows.sort(key=lambda r: float(r["t_s"]))
+        if len(rows) < 60:
+            continue
+        ts = np.array([int(r["pc_receive_unix_time_ms"]) for r in rows])
+        st = np.array([float(r["t_s"]) for r in rows])
+        qf = np.array([float(r["current_front_back_deg"]) for r in rows])
+        ql = np.array([float(r["current_left_right_deg"]) for r in rows])
+        uf = np.array([float(r["servo_front_back_offset"]) for r in rows])
+        ul = np.array([float(r["servo_left_right_offset"]) for r in rows])
+        n = len(rows)
+        dt = np.median(np.diff(st))
+        # 【关键】先平滑再差分：动捕 0.06°/拍噪声经两次数分会放大到 ~15 °/s²，
+        # 与真实加速度（~30 °/s²）同量级 → 直接 np.gradient 两次得到的目标是噪声主导、学不动。
+        qf_s, ql_s = _smooth(qf, smooth), _smooth(ql, smooth)
+        # 标签 q̈：中心差分（低噪声、零相位差）。只用于离线教学，运行时不需要估计。
+        af = _d2(qf_s, dt, acc_h); al = _d2(ql_s, dt, acc_h)
+        # 特征 q̇：必须因果（运行时无法取未来）。central=中心差分（仅对照用，非因果）；
+        # poly=因果零滞后多项式核。
+        if vel_mode == "poly":
+            pe_f, pe_l = _poly_est(qf, dt, vel_w), _poly_est(ql, dt, vel_w)
+            vf, vl = pe_f[1], pe_l[1]
+            acf, acl = pe_f[2], pe_l[2]
+        else:
+            vf = _d1(qf_s, dt, acc_h); vl = _d1(ql_s, dt, acc_h)
+            acf = _d2(qf_s, dt, acc_h); acl = _d2(ql_s, dt, acc_h)
+        qdf = np.array([float(r.get("target_front_back_deg") or 0.0) for r in rows])
+        qdl = np.array([float(r.get("target_left_right_deg") or 0.0) for r in rows])
+        # 传感器对齐（最近邻）
+        gi = np.clip(np.searchsorted(imu[0], ts), 0, len(imu[0]) - 1) if imu else None
+        gfi = np.clip(np.searchsorted(fo[0], ts), 0, len(fo[0]) - 1) if fo else None
+        hi = max(horizon, 1)
+        for i in range(len(rows) - hi):
+            # use_u_hist=False：历史里【不放 u】——否则 h 已含 u_{t-1}≈u_t，头部 u_t 输入被架空
+            # （实测：打乱 u_t 后留出 RMSE 不变 → ∂F/∂u_t≈0 → 反解无界。见 validate_forward_inverse）
+            u_prev = ((uf[i - 1], ul[i - 1]) if i > 0 else (uf[i], ul[i])) if use_u_hist else (0.0, 0.0)
+            x = [qf[i], ql[i], vf[i], vl[i], u_prev[0], u_prev[1]]
+            x += list(imu[1][gi[i]]) if imu else [0.0] * 6
+            x += list(fo[1][gfi[i]]) if fo else [0.0] * 4
+            X.append(x)
+            if horizon > 0:
+                # 跨拍视界：目标 = Δq̇ over H 拍 —— ∂(Δq̇)/∂u 在速度尺度（~τ）良态，
+                # 而单拍 ∂q̈/∂u 实测≈0（伺服+传动 10ms 内几乎不产生加速度）→ 反解不可能。
+                Y.append([vf[i + horizon] - vf[i], vl[i + horizon] - vl[i]])
+            else:
+                Y.append([af[i], al[i]])      # 目标 = 加速度（单拍）
+            S.append(sid)
+            if with_aux:
+                AUX["q"].append([qf[i], ql[i]]); AUX["q_d"].append([qdf[i], qdl[i]])
+                AUX["u"].append([uf[i], ul[i]])
+                AUX["qddot_causal"].append([acf[i], acl[i]])
+                AUX["sid"].append(sid); AUX["t"].append(st[i])
+    if not X:
+        return None
+    if with_aux:
+        return (np.asarray(X), np.asarray(Y), np.asarray(S),
+                {k: np.asarray(v) for k, v in AUX.items()})
+    return np.asarray(X), np.asarray(Y), np.asarray(S)
+
+# ---------------------------------------------------------------------------
+# 数据集构建
+# ---------------------------------------------------------------------------
 
 FEATURES = ["q_fb", "q_lr", "qdot_fb", "qdot_lr",
             "qd_fb", "qd_lr", "qdotd_fb", "qdotd_lr", "qddotd_fb", "qddotd_lr",
@@ -142,7 +299,7 @@ def main() -> int:
     ap.add_argument("--stride", type=int, default=5)
     ap.add_argument("--vel-w", type=int, default=31, help="因果 q̇ 估计器窗长（拍）")
     ap.add_argument("--threshold", type=float, default=1.0, help="收敛段阈值（度）")
-    ap.add_argument("--base-config", default="configs/static_feedforward_controller.json")
+    ap.add_argument("--base-config", default="configs/static_feedforward_slew20_controller.json")
     ap.add_argument("--device", default="auto", help="auto/cuda/cpu")
     ap.add_argument("--loso", action="store_true", help="逐会话留出（论文评价协议）")
     ap.add_argument("--train-all", action="store_true", help="全量训练并导出部署件")

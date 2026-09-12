@@ -29,6 +29,6 @@
     "mode": "direct_u",
     "cap": 0.0,
     "device": "cpu",
-    "base_config": "configs/static_feedforward_controller.json"
+    "base_config": "configs/static_feedforward_slew20_controller.json"
   }
 }

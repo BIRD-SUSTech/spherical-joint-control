@@ -132,30 +132,30 @@ python -m model.fit_controller --converged-only --couple --session <circle30会�
 #     - 训练标签 r = u_总 − g_static(q_d) 与"纯限幅缺口"相关 **0.44–0.79**
 #     - 且真实速度项与限幅缺口**数学共线**（缺口 ≈ −τ·g′·q̇）→ 现有数据无法分离二者
 #   证据见 NAS experiment_logs/R2_D2v2_verification/01_..._否决报告.md §5/§6
-# 现状：基线 configs/static_feedforward_controller.json 的 slew_limit 已是 **20.0**（D3 merge），
+# 现状：基线 configs/static_feedforward_slew20_controller.json 的 slew_limit 已是 **20.0**（D3 merge），
 #   用同一批命令重跑即得干净标签，且与旧会话 **1:1 可比**（唯一差异就是限幅）。
 # 设计：轨迹与时长**刻意与旧 D0 完全一致**（160/160/60/180s），以便逐会话量化"限幅伪影"。
 #   速度阶梯在同一位置范围上给 4 档速度（0.05/0.1/0.2/0.4Hz）→ 天然把 c·q̇ 与 g(q) 解耦，
 #   是识别**速度型**动态项的最佳轨迹（旧的目标项 q̈ 只占标签方差 11%，主导项是速度 q̇）。
 
 # 前置自检：应打印 20.0
-python -c "import json,pathlib;print(json.loads(pathlib.Path('configs/static_feedforward_controller.json').read_text(encoding='utf-8-sig'))['slew_limit'])"
+python -c "import json,pathlib;print(json.loads(pathlib.Path('configs/static_feedforward_slew20_controller.json').read_text(encoding='utf-8-sig'))['slew_limit'])"
 
 # ① 速度阶梯 20°（首选：破 q–q̈ 退化 + 激励速度/加速度）  [旧对应会话 175628]
-python -m collect.orchestrator --speed-ladder 20 --speeds 0.05 0.1 0.2 0.4 --speed-seg-dur 40 --servo-port COM5 --force-port COM3 --calibration calibrations/rig2.json --controller-config configs/static_feedforward_controller.json --startup-fade 1.0
+python -m collect.orchestrator --speed-ladder 20 --speeds 0.05 0.1 0.2 0.4 --speed-seg-dur 40 --servo-port COM5 --force-port COM3 --calibration calibrations/rig2.json --controller-config configs/static_feedforward_slew20_controller.json --startup-fade 1.0
 
 # ② 速度阶梯 30°（大角度覆盖）  [旧对应会话 174350]
-python -m collect.orchestrator --speed-ladder 30 --speeds 0.05 0.1 0.2 0.4 --speed-seg-dur 40 --servo-port COM5 --force-port COM3 --calibration calibrations/rig2.json --controller-config configs/static_feedforward_controller.json --startup-fade 1.0
+python -m collect.orchestrator --speed-ladder 30 --speeds 0.05 0.1 0.2 0.4 --speed-seg-dur 40 --servo-port COM5 --force-port COM3 --calibration calibrations/rig2.json --controller-config configs/static_feedforward_slew20_controller.json --startup-fade 1.0
 
 # ③ 线性扫频 chirp（频率连续，破单频 sine 的 q̈=−ω²q 退化）  [旧对应会话 174641]
-python -m collect.orchestrator --chirp 20 0.05 0.5 60 --servo-port COM5 --force-port COM3 --calibration calibrations/rig2.json --controller-config configs/static_feedforward_controller.json --startup-fade 1.0
+python -m collect.orchestrator --chirp 20 0.05 0.5 60 --servo-port COM5 --force-port COM3 --calibration calibrations/rig2.json --controller-config configs/static_feedforward_slew20_controller.json --startup-fade 1.0
 
 # ④ 随机多频 Fourier（2D 覆盖，位置/速度去相关）  [旧对应会话 174802]
-python -m collect.orchestrator --random-fourier 20 --seed 0 --duration 180 --servo-port COM5 --force-port COM3 --calibration calibrations/rig2.json --controller-config configs/static_feedforward_controller.json --startup-fade 1.0
+python -m collect.orchestrator --random-fourier 20 --seed 0 --duration 180 --servo-port COM5 --force-port COM3 --calibration calibrations/rig2.json --controller-config configs/static_feedforward_slew20_controller.json --startup-fade 1.0
 
 # ⑤ 每条会话的验收（三项全绿才能进训练）
-python -m model.check_d0_labels --session collect/logs/<新会话>     # ①超限%=0 ②corr(r,gap)≈0 ③方差分解
-python -m model.check_excitation --session collect/logs/<新会话>    # VIF / corr(q,q̈) / |q̈|p99
+python -m [DELETED] --session collect/logs/<新会话>     # ①超限%=0 ②corr(r,gap)≈0 ③方差分解
+python -m [DELETED] --session collect/logs/<新会话>    # VIF / corr(q,q̈) / |q̈|p99
 #   旧值对照（复核历史会话加 --slew-limit 2.0）：
 #     超限% 18.5–59.6%；corr(r,gap) 0.44–0.79
 #     方差分解 gap +0.250 / q̇ +0.743 / q̈ −0.177，R²=0.807，**仅 q̈ R²=0.114**（lr 0.108）
@@ -163,7 +163,7 @@ python -m model.check_excitation --session collect/logs/<新会话>    # VIF / c
 #   判读：若重采后"仅 q̈ R²"仍 ≈0.1 → 确认主导项是速度型 → 架构改向 g(q,q̇)，别再堆 q̈ 容量
 
 # ⑥ 对齐 merge（四路→统一时间基，训练多模态特征用）
-python -m model.merge_streams --session <新会话1> <新会话2> <新会话3> <新会话4> --out <新会话1>/aligned.npz --max-gap-ms 120
+python -m [DELETED] --session <新会话1> <新会话2> <新会话3> <新会话4> --out <新会话1>/aligned.npz --max-gap-ms 120
 
 # ============================================================
 # D2：q̈ 动态前馈 v2 的多轨迹实机 A/B（判据：≥3 条轨迹一致通过）
@@ -177,11 +177,11 @@ python -m model.merge_streams --session <新会话1> <新会话2> <新会话3> <
 #   ③ phase_report 等效延迟不恶化
 
 # 轨迹 1：Eight（关键——D1 在此翻车 fb +25.6%）
-python -m collect.orchestrator --ab --eight 20 10 --duration 60 --servo-port COM5 --force-port COM3 --calibration calibrations/rig2.json --controller-config configs/dynamic_nn_v2.json --baseline-controller-config configs/static_feedforward_controller.json --startup-fade 1.0
+python -m collect.orchestrator --ab --eight 20 10 --duration 60 --servo-port COM5 --force-port COM3 --calibration calibrations/rig2.json --controller-config [DELETED] --baseline-controller-config configs/static_feedforward_slew20_controller.json --startup-fade 1.0
 # 轨迹 2：Lissajous（D1 唯一通过的轨迹，必须复查不倒退）
-python -m collect.orchestrator --ab --lissajous 20 20 0.1 0.16 --duration 60 --servo-port COM5 --force-port COM3 --calibration calibrations/rig2.json --controller-config configs/dynamic_nn_v2.json --baseline-controller-config configs/static_feedforward_controller.json --startup-fade 1.0
+python -m collect.orchestrator --ab --lissajous 20 20 0.1 0.16 --duration 60 --servo-port COM5 --force-port COM3 --calibration calibrations/rig2.json --controller-config [DELETED] --baseline-controller-config configs/static_feedforward_slew20_controller.json --startup-fade 1.0
 # 轨迹 3：variable-circle
-python -m collect.orchestrator --ab --variable-circle 20 10 --duration 60 --servo-port COM5 --force-port COM3 --calibration calibrations/rig2.json --controller-config configs/dynamic_nn_v2.json --baseline-controller-config configs/static_feedforward_controller.json --startup-fade 1.0
+python -m collect.orchestrator --ab --variable-circle 20 10 --duration 60 --servo-port COM5 --force-port COM3 --calibration calibrations/rig2.json --controller-config [DELETED] --baseline-controller-config configs/static_feedforward_slew20_controller.json --startup-fade 1.0
 
 # 每条跑完（seg0=静态基线，seg1=dynamic_nn_v2；两段仅动态项不同，PID/gain_poly/slew 完全一致）
 python -m valuation.evaluate collect/logs/<会话> --ab
@@ -214,7 +214,7 @@ python -m valuation.phase_report collect/logs/<会话> --reversal --json
 python -m collect.orchestrator --ab --eight 20 10 --duration 60 `
   --servo-port COM5 --force-port COM3 --calibration calibrations/rig2.json `
   --controller-config configs/static_feedforward_slew20_controller.json `
-  --baseline-controller-config configs/static_feedforward_controller.json `
+  --baseline-controller-config configs/static_feedforward_slew20_controller.json `
   --startup-fade 1.0
 
 python -m valuation.evaluate collect/logs/<会话> --ab
@@ -236,14 +236,14 @@ python -m valuation.phase_report collect/logs/<会话> --reversal --json
 #     → **哪个轴被限幅，哪个轴才改善**（两条可证伪预测全部命中），因果链钉死
 #   安全：三会话 × 两段无 guardian、无饱和（0%）、seg1 的 max|q| 全部低于 seg0（过冲减少旁证）
 
-# ★ MERGE 已执行（2026-09-11）：configs/static_feedforward_controller.json 的 slew_limit = 20.0
+# ★ MERGE 已执行（2026-09-11）：configs/static_feedforward_slew20_controller.json 的 slew_limit = 20.0
 #   旧值留档 configs/static_feedforward_slew2_controller.json（供历史复现）
 #   ⚠️ dynamic_nn_v1/v2 配置未动；日后重测须把它们的 slew_limit 也同步为 20.0，否则候选被自己限幅
 #   报告：NAS experiment_logs/R2_D3_slew/01_..._通过报告.md、02_d3_三轨迹确认_merge.md
 
 # --- 下一步（顺序不可颠倒）---
 # ① 重采 D0（干净标签；采前确认基线配置已是 slew 20.0）
-#       python -m model.check_excitation <D0会话...>        # VIF / corr(q,q̈) 复核
+#       python -m [DELETED] <D0会话...>        # VIF / corr(q,q̈) 复核
 # ② 回查 级1.6 gain_cross（circle30 10s；该轨迹 lr 需求 253 offset/s 曾被限幅）
 # ③ 重测 D1 dynamic_nn_v1（先把 v1 配置 slew_limit 同步为 20.0，再与新基线对跑）
 # ④ 动态项架构改向：主导项是速度型（q̇ 标准化系数 +0.72；**仅 q̈ 的 R² 仅 0.11**）
@@ -265,9 +265,9 @@ python -m valuation.phase_report collect/logs/<会话> --reversal --json
 #   → **主导动态项是速度型**。τ 拟合（LOSO 留出）：fb 0.2142 s / lr 0.1894 s（逐折极稳）
 #     留出残差 RMSE 改善 −65.8% / −55.3%
 # 产物 configs/static_feedforward_lead_controller.json（唯一差异 = velocity_lead；τ=0 逐位退回基线）
-python -m collect.orchestrator --ab --eight 20 10 --duration 60 --servo-port COM5 --force-port COM3 --calibration calibrations/rig2.json --controller-config configs/static_feedforward_lead_controller.json --baseline-controller-config configs/static_feedforward_controller.json --startup-fade 1.0
-python -m collect.orchestrator --ab --lissajous 20 20 0.1 0.16 --duration 60 --servo-port COM5 --force-port COM3 --calibration calibrations/rig2.json --controller-config configs/static_feedforward_lead_controller.json --baseline-controller-config configs/static_feedforward_controller.json --startup-fade 1.0
-python -m collect.orchestrator --ab --variable-circle 20 10 --duration 60 --servo-port COM5 --force-port COM3 --calibration calibrations/rig2.json --controller-config configs/static_feedforward_lead_controller.json --baseline-controller-config configs/static_feedforward_controller.json --startup-fade 1.0
+python -m collect.orchestrator --ab --eight 20 10 --duration 60 --servo-port COM5 --force-port COM3 --calibration calibrations/rig2.json --controller-config [DELETED] --baseline-controller-config configs/static_feedforward_slew20_controller.json --startup-fade 1.0
+python -m collect.orchestrator --ab --lissajous 20 20 0.1 0.16 --duration 60 --servo-port COM5 --force-port COM3 --calibration calibrations/rig2.json --controller-config [DELETED] --baseline-controller-config configs/static_feedforward_slew20_controller.json --startup-fade 1.0
+python -m collect.orchestrator --ab --variable-circle 20 10 --duration 60 --servo-port COM5 --force-port COM3 --calibration calibrations/rig2.json --controller-config [DELETED] --baseline-controller-config configs/static_feedforward_slew20_controller.json --startup-fade 1.0
 python -m valuation.evaluate <会话> --ab
 python -m valuation.phase_report <会话> --reversal --json
 # 判据：三轨迹两轴 MAE/RMSE 不劣于基线；换向过冲/等效延迟不恶化
@@ -278,7 +278,7 @@ python -m valuation.phase_report <会话> --reversal --json
 # ============================================================
 # 数据：重采的干净 D0 四会话（200340/200639/200928/201038，超限 0.0%、corr(标签,缺口)=0.000）
 # 两个候选（**基座不同**，权重都在 .npz，JSON 仅留引用）：
-#   A) configs/dynamic_nn_v3.json        = g(q_d+τ·q̇_d) + NN   ← 推荐（速度前馈已是基座）
+#   A) [DELETED]        = g(q_d+τ·q̇_d) + NN   ← 推荐（速度前馈已是基座）
 #      离线：基座残余 RMSE fb 17.00/lr 24.43 → NN 后 7.87/8.00
 #   B) configs/dynamic_nn_v3_static.json = g_static(q_d) + NN   ← 对照（跳过 τ 项）
 #      离线：53.00/53.30 → 11.10/11.53
@@ -286,12 +286,12 @@ python -m valuation.phase_report <会话> --reversal --json
 # 判据：≥3 轨迹（含 Eight）两轴 MAE/RMSE 不劣于各自基座；换向过冲/等效延迟不恶化
 
 # A) v3（速度前馈 + NN）vs 其基座（速度前馈）
-python -m collect.orchestrator --ab --eight 20 10 --duration 60 --servo-port COM5 --force-port COM3 --calibration calibrations/rig2.json --controller-config configs/dynamic_nn_v3.json --baseline-controller-config configs/static_feedforward_lead_controller.json --startup-fade 1.0
+python -m collect.orchestrator --ab --eight 20 10 --duration 60 --servo-port COM5 --force-port COM3 --calibration calibrations/rig2.json --controller-config [DELETED] --baseline-controller-config [DELETED] --startup-fade 1.0
 python -m collect.orchestrator --ab --lissajous 20 20 0.1 0.16 --duration 60 (同上)
 python -m collect.orchestrator --ab --variable-circle 20 10 --duration 60 (同上)
 
 # B) v3_static（纯静态 + NN）vs 静态基线
-python -m collect.orchestrator --ab --eight 20 10 --duration 60 --servo-port COM5 --force-port COM3 --calibration calibrations/rig2.json --controller-config configs/dynamic_nn_v3_static.json --baseline-controller-config configs/static_feedforward_controller.json --startup-fade 1.0
+python -m collect.orchestrator --ab --eight 20 10 --duration 60 --servo-port COM5 --force-port COM3 --calibration calibrations/rig2.json --controller-config configs/dynamic_nn_v3_static.json --baseline-controller-config configs/static_feedforward_slew20_controller.json --startup-fade 1.0
 (同样再跑 lissajous / variable-circle)
 
 python -m valuation.evaluate <会话> --ab
@@ -306,7 +306,7 @@ python -m valuation.phase_report <会话> --reversal --json
 # 原因：τ 式 = 系数 g′(q)·τ，带工作点依赖；数据支持的系数近似常数 → 多引入 q 依赖反而更差。
 # 产物 configs/static_feedforward_vel_controller.json（两式并存：velocity_gain / velocity_lead）
 # 用法：清掉不用的那一项即得到单形式配置；系数置零逐位退回静态基线。
-python -m collect.orchestrator --ab --eight 20 10 --duration 60 --servo-port COM5 --force-port COM3 --calibration calibrations/rig2.json --controller-config configs/static_feedforward_vel_controller.json --baseline-controller-config configs/static_feedforward_controller.json --startup-fade 1.0
+python -m collect.orchestrator --ab --eight 20 10 --duration 60 --servo-port COM5 --force-port COM3 --calibration calibrations/rig2.json --controller-config [DELETED] --baseline-controller-config configs/static_feedforward_slew20_controller.json --startup-fade 1.0
 python -m collect.orchestrator --ab --lissajous 20 20 0.1 0.16 --duration 60 (同上)
 python -m collect.orchestrator --ab --variable-circle 20 10 --duration 60 (同上)
 python -m valuation.evaluate <会话> --ab
@@ -332,7 +332,7 @@ python -m valuation.phase_report <会话> --reversal --json
 
 # 第 0 步（必做）：cap=0 冒烟 —— 确认与纯静态基座逐位一致（零回归保证）
 #   两段应完全重合；若不一致，说明集成有问题，停在此步。
-python -m collect.orchestrator --ab --speed-ladder 20 --duration 60 --servo-port COM5 --force-port COM3 --calibration calibrations/rig2.json --controller-config configs/dynamic_seq_v4.json --baseline-controller-config configs/static_feedforward_controller.json --startup-fade 1.0
+python -m collect.orchestrator --ab --speed-ladder 20 --duration 60 --servo-port COM5 --force-port COM3 --calibration calibrations/rig2.json --controller-config configs/dynamic_seq_v4.json --baseline-controller-config configs/static_feedforward_slew20_controller.json --startup-fade 1.0
 
 # 第 1 步：开 cap=30（先用保守幅值；模型 Δu 典型 |中位| ~37 offset，cap 会截掉一部分）
 python - <<'PY'
@@ -344,7 +344,7 @@ d["_note"] = d["_note"].replace("cap=0", "cap=30")
 p.write_text(json.dumps(d, ensure_ascii=False, indent=2), encoding="utf-8")
 print("已写", p)
 PY
-python -m collect.orchestrator --ab --speed-ladder 20 --servo-port COM5 --force-port COM3 --calibration calibrations/rig2.json --controller-config configs/dynamic_seq_v4_cap30.json --baseline-controller-config configs/static_feedforward_controller.json --startup-fade 1.0
+python -m collect.orchestrator --ab --speed-ladder 20 --servo-port COM5 --force-port COM3 --calibration calibrations/rig2.json --controller-config configs/dynamic_seq_v4_cap30.json --baseline-controller-config configs/static_feedforward_slew20_controller.json --startup-fade 1.0
 python -m collect.orchestrator --ab --speed-ladder 30 (同上)
 python -m collect.orchestrator --ab --chirp 20 0.05 0.5 60 --duration 60 (同上)
 python -m collect.orchestrator --ab --random-fourier 20 --duration 120 (同上)

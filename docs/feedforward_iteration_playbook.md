@@ -193,7 +193,7 @@ M0 归档旧实现 → M1 L0+L3 最小闭环 → M2 L1 采集 → M3 标定+base
 # 速度阶梯（同幅度多频率）——覆盖 |q̇| 区间
 python -m collect.orchestrator --speed-ladder 20 --speeds 0.05 0.1 0.2 0.4 --duration 160 `
   --servo-port COM5 --force-port COM3 --calibration calibrations/rig2.json `
-  --controller-config configs/static_feedforward_controller.json --startup-fade 1.0
+  --controller-config configs/static_feedforward_slew20_controller.json --startup-fade 1.0
 # 随机富轨迹（多频 Fourier）——(q,q̇) 空间覆盖
 python -m collect.orchestrator --random-fourier 20 --duration 180 ... 同上
 ```
@@ -202,12 +202,12 @@ python -m collect.orchestrator --random-fourier 20 --duration 180 ... 同上
 
 ```powershell
 python -m model.fit_dynamic_nn --session <速度阶梯会话> <随机轨迹会话> ... `
-  --base-config configs/static_feedforward_controller.json `
+  --base-config configs/static_feedforward_slew20_controller.json `
   --out configs/dynamic_nn_v1.json --epochs 300
 # A/B（隔离唯一变量：g_static 相同，段1 多一个学习修正）
 python -m collect.orchestrator --ab --variable-circle 20 10 --duration 60 `
   --controller-config configs/dynamic_nn_v1.json `
-  --baseline-controller-config configs/static_feedforward_controller.json `
+  --baseline-controller-config configs/static_feedforward_slew20_controller.json `
   --servo-port COM5 --force-port COM3 --calibration calibrations/rig2.json --startup-fade 1.0
 python -m valuation.evaluate <会话> --ab
 ```

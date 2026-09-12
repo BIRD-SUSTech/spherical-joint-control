@@ -167,76 +167,6 @@ def extreme_segments():
     ]
 
 
-def multisine(amp_fb_deg, amp_lr_deg, f_lo, f_hi, n_tone, duration_s, fs, seed=0,
-              gain_fb=GAIN_FB, gain_lr=GAIN_LR, fade_s=1.5):
-    """带限随机相位多正弦（**辨识专用**激励）。返回 (t, fb, lr)。
-
-    为什么必须用它：三角波/Lissajous/扫频都是【平滑可外推】的——模型能从状态历史里
-    把 u 外推出来，于是 (历史, u_t) 相对历史【零信息增量】，∂F/∂u 不可辨识（实测：
-    去掉 u 输入后留出 RMSE 不变）。随机相位多正弦在 u 空间是**外生、宽带、不可外推**的，
-    是系统辨识的标准激励（Schoukens 多正弦）。
-
-    安全性：生成后按 **峰值** 归一到 amp_deg，再乘 raised-cosine 淡入；
-    故 offset 峰值 = amp_deg/gain，可由调用方控制（guardian 70° 兜底）。
-    双轴用独立随机相位 → 轴间不相关，2×2 增益阵可辨识。
-    """
-    import random
-    rng = random.Random(seed)
-    n = int(duration_s * fs)
-    # 对数均匀分布频率点，覆盖关注频带
-    if n_tone == 1:
-        freqs = [f_lo]
-    else:
-        freqs = [f_lo * (f_hi / f_lo) ** (k / (n_tone - 1)) for k in range(n_tone)]
-
-    def _wave(phases):
-        w = [0.0] * n
-        for f, ph in zip(freqs, phases):
-            for i in range(n):
-                w[i] += math.sin(2 * math.pi * f * (i / fs) + ph)
-        return w
-
-    wf = _wave([rng.uniform(0, 2 * math.pi) for _ in freqs])
-    wl = _wave([rng.uniform(0, 2 * math.pi) for _ in freqs])
-    # 峰值归一 + raised-cosine 淡入（从 0 起，避免上电跳变）
-    mf = max(abs(x) for x in wf) or 1.0
-    ml = max(abs(x) for x in wl) or 1.0
-    nf = int(fade_s * fs)
-    t, fb, lr = [], [], []
-    for i in range(n):
-        g = 1.0 if i >= nf else 0.5 * (1 - math.cos(math.pi * i / max(nf, 1)))
-        t.append(i / fs)
-        fb.append(deg_to_offset(amp_fb_deg * wf[i] / mf * g, "fb", gain_fb, gain_lr))
-        lr.append(deg_to_offset(amp_lr_deg * wl[i] / ml * g, "lr", gain_fb, gain_lr))
-    return t, fb, lr
-
-
-def ident_segments():
-    """**辨识专用**激励段集：u 外生宽带随机激励（反解 F 模式的前提）。
-
-    与 triangle/lissajous/steps 段集的本质区别：那些段是平滑可外推的，模型能仅凭
-    状态历史预测 u → (历史, u) 无信息增量 → ∂F/∂u 不可辨识。本段集用随机相位多正弦
-    直接驱动 offset，使 u 在统计上**独立于状态历史**。
-
-    预算 ~240s：3 个幅度档 × 2 个种子（覆盖增益非线性 + 可重复性），
-    峰值 offset = amp/gain，按 ±10/±15/±20° 三档，远低于 guardian 70°。
-    """
-    return [
-        {"kind": "multisine", "amp_fb_deg": 10.0, "amp_lr_deg": 10.0,
-         "f_lo": 0.05, "f_hi": 2.0, "n_tone": 24, "duration_s": 40.0, "seed": 1},
-        {"kind": "multisine", "amp_fb_deg": 15.0, "amp_lr_deg": 15.0,
-         "f_lo": 0.05, "f_hi": 2.0, "n_tone": 24, "duration_s": 40.0, "seed": 2},
-        {"kind": "multisine", "amp_fb_deg": 20.0, "amp_lr_deg": 20.0,
-         "f_lo": 0.05, "f_hi": 2.0, "n_tone": 24, "duration_s": 40.0, "seed": 3},
-        {"kind": "multisine", "amp_fb_deg": 15.0, "amp_lr_deg": 15.0,
-         "f_lo": 0.05, "f_hi": 2.0, "n_tone": 24, "duration_s": 40.0, "seed": 7},
-        {"kind": "multisine", "amp_fb_deg": 15.0, "amp_lr_deg": 15.0,
-         "f_lo": 0.05, "f_hi": 2.0, "n_tone": 24, "duration_s": 40.0, "seed": 11},
-        {"kind": "multisine", "amp_fb_deg": 10.0, "amp_lr_deg": 10.0,
-         "f_lo": 0.3, "f_hi": 5.0, "n_tone": 20, "duration_s": 40.0, "seed": 5},
-    ]
-
-
 def sample_segment(seg: dict, fs: float, gain_fb: float = GAIN_FB, gain_lr: float = GAIN_LR):
     """展开一条激励段 → (t, fb, lr)。seg 见 default_segments()。"""
     kind = seg["kind"]
@@ -249,8 +179,4 @@ def sample_segment(seg: dict, fs: float, gain_fb: float = GAIN_FB, gain_lr: floa
     if kind == "steps":
         return steps(seg["axis"], seg["amps_deg"], seg["hold_s"], seg["settle_s"], fs,
                      gain_fb=gain_fb, gain_lr=gain_lr)
-    if kind == "multisine":
-        return multisine(seg["amp_fb_deg"], seg["amp_lr_deg"], seg["f_lo"], seg["f_hi"],
-                         seg["n_tone"], seg["duration_s"], fs, seg.get("seed", 0),
-                         gain_fb=gain_fb, gain_lr=gain_lr)
     raise ValueError(f"unknown segment kind: {kind}")

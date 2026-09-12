@@ -44,7 +44,7 @@ def evaluate(per_session, hidden, depth, epochs, seed):
 def main() -> int:
     ap = argparse.ArgumentParser(description="IMU/力 特征 A/B（含无用特征对照）")
     ap.add_argument("--session", nargs="+", required=True)
-    ap.add_argument("--base-config", default="configs/static_feedforward_controller.json")
+    ap.add_argument("--base-config", default="configs/static_feedforward_slew20_controller.json")
     ap.add_argument("--threshold", type=float, default=1.0)
     ap.add_argument("--hidden", type=int, default=32)
     ap.add_argument("--depth", type=int, default=2)

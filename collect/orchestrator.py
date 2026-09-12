@@ -44,7 +44,7 @@ from control.trajectory import make_traj, trajectory_duration
 from control.pid import PIDController
 from excite.guardian import Guardian
 from excite.signals import (default_segments, extended_segments, extreme_segments,
-                            ident_segments, large_angle_segments, sample_segment)
+                            large_angle_segments, sample_segment)
 from hardware.mocap import MockMocap, MocapReader, Pose
 from hardware.servo import MockServoBus, ServoBus
 
@@ -130,8 +130,6 @@ def parse_args() -> argparse.Namespace:
     p.add_argument("--out", default="collect/logs", help="会话根目录")
     p.add_argument("--segment-id", type=int, default=0, help="闭环数据段 id（默认 0）")
     p.add_argument("--open-loop", action="store_true", help="开环激励模式（替代闭环）")
-    p.add_argument("--ident", action="store_true",
-                   help="辨识专用激励段集（u 外生宽带多正弦；反解 F 模式必需）")
     p.add_argument("--open-loop-fs", type=float, default=100.0, help="开环激励频率 Hz")
     p.add_argument("--open-loop-duration", type=float, default=None,
                    help="开环总时长上限 s（缺省=跑完所有激励段）")
@@ -689,9 +687,7 @@ def _trajectory_info(args) -> dict:
 
 
 def _pick_segments(args):
-    """选择开环激励段集：ident > extreme > large-angle > extended > default。"""
-    if args.ident:
-        return ident_segments()
+    """选择开环激励段集：extreme > large-angle > extended > default。"""
     if args.extreme:
         return extreme_segments()
     if args.large_angle:

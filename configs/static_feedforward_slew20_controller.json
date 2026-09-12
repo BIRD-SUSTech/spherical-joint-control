@@ -1,5 +1,5 @@
 {
-  "_note": "诊断用候选（D3）：与 static_feedforward_controller.json 逐字段相同，仅 slew_limit 2.0 → 20.0 offset/拍（100Hz → 2000 offset/s ≈170°/s）。用途：验证『Eight lr 换向过冲主因 = 200 offset/s 前馈限幅』。实测轨迹需求上限 1432 offset/s，20.0 仍留安全裕度。",
+  "_note": "【已收敛】稳态前馈控制器（rig2）：逆映射 g(q) 覆盖 ±40° + slew_limit 20.0 offset/拍 (=2000 offset/s @100Hz) + PID(kp3/ki0.5/kd0.1, limit600, deadband0.2, alpha0.3)。slew_limit 2026-09-11 由 2.0 提升到 20.0（D3 A/B：原 200 offset/s 上限削掉快轴前馈，eight lr 超限 54.3%/等效滞后 280ms；解锁后三轨迹 6/6 轴改善，收益与限幅缺口剂量成正比，lr MAE −53%，安全全绿；实测轨迹需求上限 1432 offset/s，20.0 仍留 ~40% 裕度）。本文件是 dynamic_nn_v3_static 与 dynamic_seq_v4 的共同基座。",
   "gain_poly": {
     "fb": [
       -4.889534371163219,
